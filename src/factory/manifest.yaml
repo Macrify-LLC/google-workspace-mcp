@@ -342,7 +342,7 @@ services:
           end: "--end"
           description: "--description"
           location: "--location"
-          attendees: "--attendees"
+          attendees: "--attendee"
 
       quickAdd:
         type: action

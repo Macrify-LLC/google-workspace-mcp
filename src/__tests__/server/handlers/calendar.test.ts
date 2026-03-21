@@ -68,7 +68,7 @@ describe('handleCalendar', () => {
 
       const args = mockExecute.mock.calls[0][0];
       expect(args).toContain('--location');
-      expect(args).toContain('--attendees');
+      expect(args).toContain('--attendee');
     });
 
     it('returns markdown with event details', async () => {

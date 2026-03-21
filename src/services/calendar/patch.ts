@@ -96,7 +96,7 @@ export const calendarPatch: ServicePatch = {
       const args = ['calendar', '+insert', '--summary', summary, '--start', start, '--end', end];
       if (params.description) args.push('--description', String(params.description));
       if (params.location) args.push('--location', String(params.location));
-      if (params.attendees) args.push('--attendees', String(params.attendees));
+      if (params.attendees) args.push('--attendee', String(params.attendees));
       const result = await execute(args, { account });
       const data = result.data as Record<string, unknown>;
       return {
