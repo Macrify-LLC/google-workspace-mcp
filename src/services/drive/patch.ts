@@ -40,7 +40,10 @@ export const drivePatch: ServicePatch = {
   customHandlers: {
     upload: async (params, account): Promise<HandlerResponse> => {
       const filePath = requireString(params, 'filePath');
-      const args = ['drive', '+upload', filePath];
+      // Restrict uploads to files within the workspace directory
+      const safePath = resolveWorkspacePath(filePath);
+      await verifyPathSafety(safePath);
+      const args = ['drive', '+upload', safePath];
       if (params.name) args.push('--name', String(params.name));
       if (params.parentFolderId) args.push('--parent', String(params.parentFolderId));
       const result = await execute(args, { account });

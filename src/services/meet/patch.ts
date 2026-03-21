@@ -11,6 +11,7 @@
 
 import { execute } from '../../executor/gws.js';
 import { nextSteps } from '../../server/formatting/next-steps.js';
+import { wrapExternal } from '../../server/formatting/markdown.js';
 import type { ServicePatch, PatchContext } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -277,7 +278,7 @@ function formatTranscriptEntries(data: unknown): HandlerResponse {
   const blocks = collapseEntries(resolved);
 
   return {
-    text: `## Transcript (${entries.length} entries)\n\n${blocks.join('\n\n')}`,
+    text: `## Transcript (${entries.length} entries)\n\n${wrapExternal(blocks.join('\n\n'), 'meeting transcript')}`,
     refs: {
       count: entries.length,
       entries: entries.map(e => ({
@@ -416,7 +417,7 @@ async function getFullTranscript(
   }
 
   return {
-    text: `## Transcript (${entries.length} entries)\n\n${blocks.join('\n\n')}${footer.join('')}` +
+    text: `## Transcript (${entries.length} entries)\n\n${wrapExternal(blocks.join('\n\n'), 'meeting transcript')}${footer.join('')}` +
       nextSteps('meet', 'getFullTranscript', { email: account, conferenceId: confId }),
     refs: {
       conferenceId: confId,
