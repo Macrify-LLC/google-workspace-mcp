@@ -87,13 +87,23 @@ export async function handleEmail(params: Record<string, unknown>): Promise<Hand
       const to = requireString(params, 'to');
       const subject = requireString(params, 'subject');
       const body = requireString(params, 'body');
-      const result = await execute([
-        'gmail', '+send',
-        '--to', to, '--subject', subject, '--body', body,
-      ], { account: email });
+      const cc = typeof params.cc === 'string' && params.cc.trim() ? params.cc.trim() : undefined;
+      const bcc = typeof params.bcc === 'string' && params.bcc.trim() ? params.bcc.trim() : undefined;
+      const args = ['gmail', '+send', '--to', to, '--subject', subject, '--body', body];
+      if (cc) args.push('--cc', cc);
+      if (bcc) args.push('--bcc', bcc);
+      const result = await execute(args, { account: email });
       const data = result.data as Record<string, unknown>;
+      // A successful Gmail send ALWAYS returns a message id. No id means the send
+      // did not actually happen — fail loudly instead of reporting a false success.
+      if (!data || typeof data.id !== 'string' || !data.id) {
+        throw new Error(
+          `Email send to ${to} did not return a message id — the message was NOT sent. ` +
+          `gws output: ${JSON.stringify(data)}${result.stderr ? ` | stderr: ${result.stderr}` : ''}`,
+        );
+      }
       return {
-        text: `Email sent to ${to}.\n\n**Subject:** ${subject}\n**Message ID:** ${data.id ?? 'unknown'}` +
+        text: `Email sent to ${to}.\n\n**Subject:** ${subject}\n**Message ID:** ${data.id}` +
           nextSteps('email', 'send', { email }),
         refs: { id: data.id, threadId: data.threadId, to, subject },
       };
@@ -106,8 +116,15 @@ export async function handleEmail(params: Record<string, unknown>): Promise<Hand
         'gmail', '+reply', '--message-id', messageId, '--body', body,
       ], { account: email });
       const data = result.data as Record<string, unknown>;
+      // Same invariant as send: a real reply returns a message id.
+      if (!data || typeof data.id !== 'string' || !data.id) {
+        throw new Error(
+          `Reply to ${messageId} did not return a message id — the reply was NOT sent. ` +
+          `gws output: ${JSON.stringify(data)}${result.stderr ? ` | stderr: ${result.stderr}` : ''}`,
+        );
+      }
       return {
-        text: `Reply sent.\n\n**Message ID:** ${data.id ?? 'unknown'}` +
+        text: `Reply sent.\n\n**Message ID:** ${data.id}` +
           nextSteps('email', 'reply', { email }),
         refs: { id: data.id, threadId: data.threadId, messageId },
       };
