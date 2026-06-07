@@ -250,6 +250,7 @@ async function scheduleTokenRefresh(): Promise<void> {
       const { hasCredential } = await import('../accounts/credentials.js');
       const { warmTokenCache } = await import('../accounts/token-service.js');
       const accounts = await listAccounts();
+      const { invalidateToken } = await import('../accounts/token-service.js');
       const withCreds: string[] = [];
       for (const account of accounts) {
         if (await hasCredential(account.email)) {
@@ -257,6 +258,10 @@ async function scheduleTokenRefresh(): Promise<void> {
         }
       }
       if (withCreds.length > 0) {
+        // Evict cached tokens first so warmTokenCache performs a real network
+        // refresh. Without this, getAccessToken returns the still-valid cached
+        // token and no refresh happens until the cache expires on its own.
+        for (const e of withCreds) invalidateToken(e);
         await warmTokenCache(withCreds);
         log(`keepalive: refreshed tokens for ${withCreds.length} account(s)`);
       }
