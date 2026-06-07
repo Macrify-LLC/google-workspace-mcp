@@ -237,10 +237,45 @@ async function warmupAccounts(): Promise<void> {
   }
 }
 
+/**
+ * Proactively refresh access tokens before they expire. Google OAuth access
+ * tokens last ~1 hour; after expiry the first real API call silently fails.
+ * Running a refresh every 50 minutes keeps tokens hot for long-running sessions.
+ */
+async function scheduleTokenRefresh(): Promise<void> {
+  const REFRESH_INTERVAL_MS = 50 * 60 * 1000; // 50 minutes
+  const refresh = async () => {
+    try {
+      const { listAccounts } = await import('../accounts/registry.js');
+      const { hasCredential } = await import('../accounts/credentials.js');
+      const { warmTokenCache } = await import('../accounts/token-service.js');
+      const accounts = await listAccounts();
+      const withCreds: string[] = [];
+      for (const account of accounts) {
+        if (await hasCredential(account.email)) {
+          withCreds.push(account.email);
+        }
+      }
+      if (withCreds.length > 0) {
+        await warmTokenCache(withCreds);
+        log(`keepalive: refreshed tokens for ${withCreds.length} account(s)`);
+      }
+    } catch (err) {
+      log(`keepalive: token refresh failed (${(err as Error).message})`);
+    }
+  };
+  // setInterval keeps the event loop alive — unref() so the timer doesn't
+  // prevent the process from exiting if the MCP transport closes cleanly.
+  const timer = setInterval(refresh, REFRESH_INTERVAL_MS);
+  if (timer.unref) timer.unref();
+}
+
 export async function startServer(): Promise<void> {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Non-blocking warmup — don't delay MCP handshake
   warmupAccounts().catch(() => {});
+  // Proactively refresh tokens every 50 min to prevent silent send failures
+  scheduleTokenRefresh().catch(() => {});
 }
