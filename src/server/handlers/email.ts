@@ -94,9 +94,9 @@ export async function handleEmail(params: Record<string, unknown>): Promise<Hand
       if (bcc) args.push('--bcc', bcc);
       const result = await execute(args, { account: email });
       const data = result.data as Record<string, unknown>;
-      // A successful Gmail send ALWAYS returns a message id. No id means the send
-      // did not actually happen — fail loudly instead of reporting a false success.
-      if (!data || typeof data.id !== 'string' || !data.id) {
+      // A successful Gmail send ALWAYS returns a real message id. No id, empty id,
+      // or the sentinel value "unknown" means the send did not actually happen.
+      if (!data || typeof data.id !== 'string' || !data.id || data.id === 'unknown') {
         throw new Error(
           `Email send to ${to} did not return a message id — the message was NOT sent. ` +
           `gws output: ${JSON.stringify(data)}${result.stderr ? ` | stderr: ${result.stderr}` : ''}`,
@@ -117,7 +117,7 @@ export async function handleEmail(params: Record<string, unknown>): Promise<Hand
       ], { account: email });
       const data = result.data as Record<string, unknown>;
       // Same invariant as send: a real reply returns a message id.
-      if (!data || typeof data.id !== 'string' || !data.id) {
+      if (!data || typeof data.id !== 'string' || !data.id || data.id === 'unknown') {
         throw new Error(
           `Reply to ${messageId} did not return a message id — the reply was NOT sent. ` +
           `gws output: ${JSON.stringify(data)}${result.stderr ? ` | stderr: ${result.stderr}` : ''}`,
