@@ -2,16 +2,19 @@
  * Calendar patch — domain-specific hooks for the calendar service.
  *
  * Key customizations:
- * - List: default timeMin to today start
- * - Agenda: raw text passthrough with event refs extraction
- * - Create: custom response formatting with event details
+ * - List: default timeMin to today start, include calendarId in output
+ * - Agenda: rich helper with day-range params, calendarId per event
+ * - Freebusy: custom handler (POST body via --json, not --params)
+ * - Create: custom response formatting with event details + --meet flag
  * - Delete: custom confirmation message
  */
 
-import { execute } from '../../executor/gws.js';
+import { createHash } from 'node:crypto';
+
+import { call } from '../../google/client.js';
 import { formatEventList, formatEventDetail } from '../../server/formatting/markdown.js';
-import { nextSteps } from '../../server/formatting/next-steps.js';
-import { requireString } from '../../server/handlers/validate.js';
+import { requireString, optionalString } from '../../server/handlers/validate.js';
+import { allDayDate, exclusiveEndDate, allDayRange } from './dates.js';
 import type { ServicePatch, PatchContext } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -42,24 +45,202 @@ function formatCalendarList(data: unknown): HandlerResponse {
   };
 }
 
+/** Format event list with calendarId enrichment. */
+function formatEventListWithCalendar(data: unknown, ctx: PatchContext): HandlerResponse {
+  const result = formatEventList(data);
+  const calendarId = (ctx.params.calendarId as string) || 'primary';
+
+  // Enrich refs with calendarId so follow-up get calls work on shared calendars
+  result.refs = { ...result.refs, calendarId };
+
+  // Add calendarId hint to output when not primary
+  if (calendarId !== 'primary') {
+    result.text = result.text.replace(
+      /^## Events/,
+      `## Events (calendar: ${calendarId})`,
+    );
+  }
+
+  return result;
+}
+
+/** Format freebusy response into readable busy/free blocks. */
+function formatFreeBusy(data: unknown, ctx: PatchContext): HandlerResponse {
+  const raw = data as Record<string, unknown>;
+  const calendars = (raw?.calendars ?? {}) as Record<string, { busy?: Array<{ start: string; end: string }>; errors?: Array<{ domain: string; reason: string }> }>;
+
+  const parts: string[] = ['## Availability\n'];
+  const allBusy: Array<{ calendar: string; start: string; end: string }> = [];
+
+  for (const [calId, info] of Object.entries(calendars)) {
+    // Surface API errors (e.g., permission denied on a calendar)
+    if (info.errors && info.errors.length > 0) {
+      const reasons = info.errors.map(e => e.reason).join(', ');
+      parts.push(`**${calId}**: ⚠ Unable to check (${reasons})`);
+      continue;
+    }
+    const busy = info.busy ?? [];
+    if (busy.length === 0) {
+      parts.push(`**${calId}**: Free for entire range`);
+    } else {
+      parts.push(`**${calId}**: ${busy.length} busy block${busy.length !== 1 ? 's' : ''}`);
+      for (const block of busy) {
+        const start = new Date(block.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+        const end = new Date(block.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+        parts.push(`  - ${start} – ${end}`);
+        allBusy.push({ calendar: calId, start: block.start, end: block.end });
+      }
+    }
+  }
+
+  return {
+    text: parts.join('\n'),
+    refs: {
+      calendars: Object.keys(calendars),
+      busyBlocks: allBusy,
+      timeMin: ctx.params.timeMin,
+      timeMax: ctx.params.timeMax,
+    },
+  };
+}
+
+/** An event merged from one of the account's calendars. */
+interface AgendaEvent {
+  id: string;
+  calendarId: string;
+  calendarName: string;
+  summary: string;
+  location: string;
+  /** RFC 3339 for a timed event; a bare YYYY-MM-DD for an all-day one. */
+  start: string;
+  end: string;
+  allDay: boolean;
+}
+
+/**
+ * Compute the agenda window.
+ *
+ * Every window starts at the START OF A DAY, which is what a person means when they
+ * ask for their agenda. A rolling `[now, now+7d]` window is NOT a week: it silently
+ * excludes everything earlier today. Do not reintroduce one.
+ */
+function agendaWindow(params: Record<string, unknown>): { timeMin: string; timeMax: string } {
+  const startOfDay = (offsetDays: number): Date => {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  };
+
+  if (params.tomorrow === true || params.tomorrow === 'true') {
+    return { timeMin: startOfDay(1).toISOString(), timeMax: startOfDay(2).toISOString() };
+  }
+  const days = params.week === true || params.week === 'true'
+    ? 7
+    : Number(params.days ?? 1) || 1;
+  return { timeMin: startOfDay(0).toISOString(), timeMax: startOfDay(days).toISOString() };
+}
+
+/** Render the merged agenda. Grouped by day, because that is how a day is read. */
+function formatAgenda(events: AgendaEvent[], window: { timeMin: string; timeMax: string }): HandlerResponse {
+  if (events.length === 0) {
+    return {
+      text: 'No events scheduled.',
+      refs: { count: 0, timeMin: window.timeMin, timeMax: window.timeMax },
+    };
+  }
+
+  const dayOf = (e: AgendaEvent) => e.start.slice(0, 10);
+  const time = (e: AgendaEvent) =>
+    e.allDay
+      ? 'all day'
+      : new Date(e.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+  const lines: string[] = [];
+  let currentDay = '';
+  for (const e of events) {
+    const day = dayOf(e);
+    if (day !== currentDay) {
+      currentDay = day;
+      const label = new Date(`${day}T12:00:00`).toLocaleDateString('en-US', {
+        weekday: 'long', month: 'short', day: 'numeric',
+      });
+      lines.push(`${lines.length ? '\n' : ''}### ${label}`);
+    }
+    const where = e.location ? ` — ${e.location}` : '';
+    const whose = e.calendarName ? ` _(${e.calendarName})_` : '';
+    lines.push(`- **${time(e)}** ${e.summary}${where}${whose}`);
+  }
+
+  return {
+    text: `## Agenda (${events.length} event${events.length === 1 ? '' : 's'})\n\n${lines.join('\n')}`,
+    refs: {
+      count: events.length,
+      timeMin: window.timeMin,
+      timeMax: window.timeMax,
+      eventId: events[0]?.id,
+      // calendarId per event: a follow-up `get` on a shared calendar needs it,
+      // and it is the whole reason this operation exists rather than `list`.
+      events: events.map((e) => ({ id: e.id, calendarId: e.calendarId, summary: e.summary })),
+    },
+  };
+}
+
+/**
+ * Fields Google owns. events.update REPLACES the resource, so the existing event is read
+ * and echoed back — but these are server-generated and must not be echoed with it.
+ */
+const READ_ONLY_EVENT_FIELDS = [
+  'kind', 'etag', 'id', 'htmlLink', 'created', 'updated', 'iCalUID', 'sequence',
+  'creator', 'organizer', 'hangoutLink', 'conferenceData', 'eventType',
+];
+
+/**
+ * Remove an event's Meet link, preserving everything else about the event.
+ *
+ * The only call that removes a conference is a full events.update omitting
+ * conferenceData — patch accepts `null` and `{}` with a 200 and changes nothing
+ * (measured). A full update replaces the resource, so anything not echoed back is
+ * DESTROYED: read the event, drop the server-owned fields, layer the caller's changes on
+ * top, and send the result.
+ *
+ * `conferenceDataVersion: 1` is required for the omission to be honoured as a removal
+ * rather than ignored as an unmanaged field.
+ */
+async function removeMeetLink(
+  calendarId: string,
+  eventId: string,
+  changes: Record<string, unknown>,
+  account: string,
+): Promise<Record<string, unknown>> {
+  const existing = await call('calendar', 'events.get',
+    { calendarId, eventId }, { account }) as Record<string, unknown>;
+
+  const preserved: Record<string, unknown> = { ...existing };
+  for (const field of READ_ONLY_EVENT_FIELDS) delete preserved[field];
+
+  return await call('calendar', 'events.update', {
+    calendarId,
+    eventId,
+    conferenceDataVersion: 1,
+    ...preserved,
+    ...changes,
+  }, { account }) as Record<string, unknown>;
+}
+
 export const calendarPatch: ServicePatch = {
   beforeExecute: {
-    list: async (args, ctx) => {
-      // Inject default timeMin (today start) if not provided
-      if (!ctx.params.timeMin) {
-        const now = new Date();
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-        // Patch the --params JSON to include timeMin
-        const paramsIdx = args.indexOf('--params');
-        if (paramsIdx !== -1) {
-          const gwsParams = JSON.parse(args[paramsIdx + 1]);
-          if (!gwsParams.timeMin) {
-            gwsParams.timeMin = todayStart;
-          }
-          args[paramsIdx + 1] = JSON.stringify(gwsParams);
-        }
-      }
-      return args;
+    // Default the range to "from the start of today" when the caller gave none.
+    //
+    // This used to reach into an argv slot and re-serialise its JSON:
+    //   const i = args.indexOf('--params'); JSON.parse(args[i + 1]) …
+    // — surgery on a command line, only because the seam WAS a command line.
+    // The hook now receives the params themselves (ADR-103).
+    list: async (params) => {
+      if (params.timeMin) return params;
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      return { ...params, timeMin: todayStart };
     },
   },
 
@@ -68,56 +249,348 @@ export const calendarPatch: ServicePatch = {
       case 'calendars':
         return formatCalendarList(data);
       default:
-        return formatEventList(data);
+        return formatEventListWithCalendar(data, ctx);
     }
   },
   formatDetail: (data: unknown) => formatEventDetail(data),
 
   customHandlers: {
+    /**
+     * Agenda: every calendar the account can see, merged into one timeline.
+     *
+     * Built from raw Google, and reshaped here rather than anywhere below us.
+     *
+     * Two failure modes this deliberately avoids:
+     *   - do NOT swallow per-calendar failures. A calendar you have lost access to
+     *     must not contribute zero events in silence — surface it.
+     *   - do NOT cap events per calendar without pagination. A busy calendar would
+     *     silently lose the tail. Ask for the whole window we were asked for.
+     */
     agenda: async (params, account): Promise<HandlerResponse> => {
-      const result = await execute(['calendar', '+agenda'], { account });
-      const data = result.data as Record<string, unknown> | undefined;
-      const text = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
-      const events = Array.isArray(data?.events) ? data.events : [];
-      return {
-        text: text + nextSteps('calendar', 'agenda', { email: account }),
-        refs: {
-          count: events.length,
-          eventId: events[0]?.id,
-          events: events.map((e: Record<string, unknown>) => e.id),
-        },
-      };
+      const window = agendaWindow(params);
+
+      const calList = await call('calendar', 'calendarList.list', {}, { account }) as Record<string, unknown>;
+      let calendars = ((calList.items ?? []) as Array<Record<string, unknown>>)
+        .filter((c) => c.id);
+
+      // Optional filter: match an id exactly, or a display name by substring.
+      if (params.calendarId) {
+        const needle = String(params.calendarId).toLowerCase();
+        calendars = calendars.filter((c) =>
+          String(c.id).toLowerCase() === needle ||
+          String(c.summary ?? '').toLowerCase().includes(needle));
+        if (calendars.length === 0) {
+          return {
+            text: `No calendar matches "${params.calendarId}". Use the \`calendars\` operation to list them.`,
+            refs: { count: 0 },
+          };
+        }
+      }
+
+      const failures: string[] = [];
+      const perCalendar = await Promise.all(calendars.map(async (cal) => {
+        const calendarId = String(cal.id);
+        const calendarName = String(cal.summary ?? calendarId);
+        try {
+          const res = await call('calendar', 'events.list', {
+            calendarId,
+            timeMin: window.timeMin,
+            timeMax: window.timeMax,
+            singleEvents: true,          // expand recurrences into instances
+            orderBy: 'startTime',
+          }, { account }) as Record<string, unknown>;
+
+          return ((res.items ?? []) as Array<Record<string, unknown>>).map((e): AgendaEvent => {
+            const start = e.start as { dateTime?: string; date?: string } | undefined;
+            const end = e.end as { dateTime?: string; date?: string } | undefined;
+            const allDay = !start?.dateTime;
+            return {
+              id: String(e.id ?? ''),
+              calendarId,
+              calendarName,
+              summary: String(e.summary ?? '(no title)'),
+              location: String(e.location ?? ''),
+              start: String(start?.dateTime ?? start?.date ?? ''),
+              end: String(end?.dateTime ?? end?.date ?? ''),
+              allDay,
+            };
+          });
+        } catch (err) {
+          // Do NOT swallow this. A calendar that cannot be read is information.
+          failures.push(`${calendarName}: ${err instanceof Error ? err.message : String(err)}`);
+          return [];
+        }
+      }));
+
+      // Merge and sort. All-day events (a bare date) sort before timed events on
+      // the same day, which is what a reader expects.
+      const events = perCalendar.flat().sort((a, b) => a.start.localeCompare(b.start));
+
+      const response = formatAgenda(events, window);
+      if (failures.length > 0) {
+        response.text += `\n\n> ⚠ ${failures.length} calendar(s) could not be read:\n` +
+          failures.map((f) => `> - ${f}`).join('\n');
+        response.refs = { ...response.refs, unreadableCalendars: failures };
+      }
+      return response;
+    },
+
+    freebusy: async (params, account): Promise<HandlerResponse> => {
+      const timeMin = requireString(params, 'timeMin');
+      const timeMax = requireString(params, 'timeMax');
+
+      // Build calendar items list from attendees + own calendar (deduplicated)
+      const seen = new Set<string>([account]);
+      const items: Array<{ id: string }> = [{ id: account }];
+      const addItem = (id: string) => { if (!seen.has(id)) { seen.add(id); items.push({ id }); } };
+
+      if (params.attendees) {
+        for (const email of String(params.attendees).split(',').map(e => e.trim()).filter(Boolean)) {
+          addItem(email);
+        }
+      }
+      if (params.calendarId) {
+        for (const id of String(params.calendarId).split(',').map(e => e.trim()).filter(Boolean)) {
+          addItem(id);
+        }
+      }
+
+      const data = await call('calendar', 'freebusy.query', { timeMin, timeMax, items }, { account });
+      return formatFreeBusy(data, { operation: 'freebusy', params, account });
     },
 
     create: async (params, account): Promise<HandlerResponse> => {
       const summary = requireString(params, 'summary');
       const start = requireString(params, 'start');
-      const end = requireString(params, 'end');
-      const args = ['calendar', '+insert', '--summary', summary, '--start', start, '--end', end];
-      if (params.description) args.push('--description', String(params.description));
-      if (params.location) args.push('--location', String(params.location));
-      if (params.attendees) args.push('--attendee', String(params.attendees));
-      const result = await execute(args, { account });
-      const data = result.data as Record<string, unknown>;
+      const allDay = params.allDay === true;
+      // `end` is optional ONLY for all-day events (defaults to the start date).
+      // A timed event without an end has no duration — reject it explicitly.
+      const end = optionalString(params, 'end');
+      if (!allDay && end === undefined) {
+        throw new Error('end is required for timed events (or pass allDay: true for a date-only event)');
+      }
+      const calendarId = (params.calendarId as string) || 'primary';
+
+      // Attendees are an ARRAY OF OBJECTS in the event body, not a repeated scalar.
+      // All-day events use `date` (YYYY-MM-DD); timed ones use `dateTime` (RFC 3339).
+      const body: Record<string, unknown> = { calendarId, summary };
+      if (allDay) {
+        body.start = { date: allDayDate(start) };
+        // The Calendar API's all-day end date is EXCLUSIVE — one day after the
+        // last day. `end` here is the caller's INCLUSIVE last day, and defaults
+        // to the start date (a one-day event).
+        body.end = { date: exclusiveEndDate(start, end ?? start) };
+      } else {
+        body.start = { dateTime: start };
+        body.end = { dateTime: end };
+      }
+      if (params.description) body.description = String(params.description);
+      if (params.location) body.location = String(params.location);
+      if (params.attendees) {
+        body.attendees = String(params.attendees)
+          .split(',').map((e) => e.trim()).filter(Boolean)
+          .map((email) => ({ email }));
+      }
+
+      if (params.meet) {
+        // Ask Google to mint a Meet link. `requestId` is an IDEMPOTENCY KEY: reuse
+        // it and Google reuses the conference instead of creating a second one.
+        // Derive it deterministically from the event fields so a retried create
+        // cannot double-book.
+        const fingerprint = createHash('sha256')
+          .update(JSON.stringify({ calendarId, summary, start, end, allDay, location: params.location ?? '' }))
+          .digest('hex').slice(0, 32);
+        body.conferenceData = {
+          createRequest: {
+            requestId: fingerprint,
+            conferenceSolutionKey: { type: 'hangoutsMeet' },
+          },
+        };
+        body.conferenceDataVersion = 1;   // required, or Google ignores conferenceData entirely
+      }
+
+      const data = await call('calendar', 'events.insert', body, { account }) as Record<string, unknown>;
+      const meetLink = params.meet ? ' (with Google Meet)' : '';
+      const allDayMarker = allDay ? ' (all day)' : '';
+      const when = allDay ? allDayRange(start, end) : `${start} – ${end}`;
       return {
-        text: `Event created: **${summary}**\n\n` +
-          `**When:** ${start} – ${end}\n` +
+        text: `Event created: **${summary}**${meetLink}${allDayMarker}\n\n` +
+          `**When:** ${when}\n` +
           (params.location ? `**Where:** ${params.location}\n` : '') +
-          `**Event ID:** ${data.id ?? 'unknown'}` +
-          nextSteps('calendar', 'create', { email: account }),
-        refs: { id: data.id, eventId: data.id, summary, start, end },
+          `**Calendar:** ${calendarId}\n` +
+          `**Event ID:** ${data.id ?? 'unknown'}`,
+        refs: { id: data.id, eventId: data.id, calendarId, summary, start, end, allDay },
       };
     },
 
     delete: async (params, account): Promise<HandlerResponse> => {
       const eventId = requireString(params, 'eventId');
-      await execute([
-        'calendar', 'events', 'delete',
-        '--params', JSON.stringify({ calendarId: 'primary', eventId }),
-      ], { account });
+      const calendarId = (params.calendarId as string) || 'primary';
+      await call('calendar', 'events.delete', { calendarId, eventId }, { account });
       return {
-        text: `Event deleted: ${eventId}` + nextSteps('calendar', 'delete', { email: account }),
+        text: `Event deleted: ${eventId}`,
         refs: { eventId, status: 'deleted' },
+      };
+    },
+
+    update: async (params, account): Promise<HandlerResponse> => {
+      // events.patch takes `calendarId` + `eventId` via --params (path/query)
+      // and the changed fields as a JSON body via --json. The manifest-driven
+      // generator only emits --params, so without this handler the body is
+      // empty and Google returns 200 without applying anything — silently.
+      const eventId = requireString(params, 'eventId');
+      const calendarId = (params.calendarId as string) || 'primary';
+
+      const body: Record<string, unknown> = {};
+      if (params.summary !== undefined) body.summary = String(params.summary);
+      if (params.description !== undefined) body.description = String(params.description);
+      if (params.location !== undefined) body.location = String(params.location);
+
+      // All-day updates map start/end to `date` (YYYY-MM-DD); timed ones to
+      // `dateTime` (RFC 3339).
+      //
+      // events.patch MERGES these nested objects rather than replacing them, so
+      // sending `{ date }` onto an event that holds `{ dateTime }` leaves BOTH
+      // fields set and Google rejects it with "Invalid start time". Send the
+      // counterpart as an explicit null so the merge clears the old shape —
+      // that null is what makes a timed <-> all-day conversion possible.
+      const allDay = params.allDay === true;
+
+      // Google requires start and end to share a shape. Patching one alone is
+      // fine while the shape is unchanged, but a CONVERSION has to move both or
+      // the event is left half-converted and comes back as a 400. Only one
+      // supplied is the sole case that can go wrong, so the shape of the event
+      // as it stands is fetched only then — every other update still costs one
+      // API call, not two.
+      let derivedStart: string | undefined;
+      let derivedEnd: string | undefined;
+      if ((params.start === undefined) !== (params.end === undefined)) {
+        const existing = await call('calendar', 'events.get',
+          { calendarId, eventId }, { account }) as Record<string, unknown>;
+        const exStart = existing?.start as Record<string, unknown> | undefined;
+        const exEnd = existing?.end as Record<string, unknown> | undefined;
+        const existingIsAllDay = !exStart?.dateTime;
+
+        if (allDay !== existingIsAllDay) {
+          // Converting TO all-day: the side the caller left out is derivable,
+          // because a datetime projects onto a date by taking its date part.
+          // Deriving from the EXISTING value rather than from the supplied one
+          // preserves the event's span — a two-day meeting stays two days.
+          if (allDay) {
+            const counterpart = params.start === undefined ? exStart : exEnd;
+            const raw = counterpart?.dateTime ?? counterpart?.date;
+            if (typeof raw !== 'string') {
+              throw new Error(
+                'Converting to all-day needs both start and end, and the event on record ' +
+                'has no usable counterpart to derive the missing one from.',
+              );
+            }
+            if (params.start === undefined) derivedStart = allDayDate(raw);
+            else derivedEnd = allDayDate(raw);
+          } else {
+            // Converting FROM all-day, the missing side is a datetime, and there
+            // is no honest way to invent a time of day the caller never gave —
+            // any choice silently rewrites when the event happens.
+            throw new Error(
+              'Converting an event from all-day to timed needs both start and end, ' +
+              'because the missing one would need a time of day that only you can choose.',
+            );
+          }
+        }
+      }
+
+      const startValue = params.start ?? derivedStart;
+      const endValue = params.end ?? derivedEnd;
+
+      if (startValue !== undefined) {
+        body.start = allDay
+          ? { date: allDayDate(String(startValue)), dateTime: null }
+          : { dateTime: String(startValue), date: null };
+      }
+      if (endValue !== undefined) {
+        // The API's all-day end is EXCLUSIVE; the caller's is INCLUSIVE. Patching
+        // an end without a start has no anchor to measure from, so the end date
+        // itself is treated as the inclusive last day; `body.start` is left unset
+        // either way, so the event keeps the start it already had.
+        body.end = allDay
+          ? { date: exclusiveEndDate(String(startValue ?? endValue), String(endValue)), dateTime: null }
+          : { dateTime: String(endValue), date: null };
+      }
+
+      // attendees: comma-separated string → array of {email} objects.
+      // Google events.patch replaces the attendees array wholesale (no diff semantics),
+      // so the caller must re-supply every guest they want kept.
+      if (params.attendees !== undefined) {
+        const attendeeList = String(params.attendees)
+          .split(',')
+          .map(e => e.trim())
+          .filter(Boolean);
+        body.attendees = attendeeList.map(email => ({ email }));
+      }
+
+      // Build --params: note the conferenceDataVersion=1 requirement when creating a Meet link.
+      const queryParams: Record<string, unknown> = { calendarId, eventId };
+
+      // Optional Meet link.
+      //
+      // ADDING is a patch: conferenceData.createRequest plus conferenceDataVersion=1.
+      //
+      // REMOVING is not, and the comment that used to sit here said Google forbids it.
+      // Measured against live Google, that is not what happens: events.patch with
+      // `conferenceData: null` returns 200 and leaves the link in place, and so does
+      // `conferenceData: {}`. Removal works only through a FULL events.update that omits
+      // conferenceData. Both silent-success shapes, indistinguishable from a refusal —
+      // which is presumably how the claim survived unchallenged.
+      //
+      // events.update REPLACES the resource, so the existing event has to be read and
+      // echoed back. Skipping that is not a style question: a naive update during this
+      // investigation wiped the probe event's `location` without a word.
+      //
+      // None of which the agent should have to know. `meet: false` removes the link;
+      // the read-modify-write lives here. See removeMeetLink below.
+      const removingMeet = params.meet === false;
+      if (params.meet === true) {
+        const requestId = `meet-${eventId}-${Date.now()}`;
+        body.conferenceData = {
+          createRequest: {
+            requestId,
+            conferenceSolutionKey: { type: 'hangoutsMeet' },
+          },
+        };
+        queryParams.conferenceDataVersion = 1;
+      }
+
+      // Removing the Meet link IS a change, even with no other field set. It used to
+      // fall through to this guard and report "no field to change" for a request that
+      // named one.
+      if (Object.keys(body).length === 0 && !removingMeet) {
+        throw new Error(
+          'update requires at least one field to change: summary, start, end, description, location, attendees, or meet',
+        );
+      }
+
+      const data = removingMeet
+        ? await removeMeetLink(calendarId, eventId, body, account)
+        : await call('calendar', 'events.patch', {
+          ...queryParams,
+          ...body,
+        }, { account }) as Record<string, unknown>;
+
+      const changed = Object.keys(body);
+      const meetLink = data.hangoutLink ? `\n**Meet:** ${data.hangoutLink}` : '';
+      return {
+        text: `Event updated: **${data.summary ?? eventId}**\n\n` +
+          `**Event ID:** ${data.id ?? eventId}\n` +
+          `**Calendar:** ${calendarId}\n` +
+          `**Fields changed:** ${changed.join(', ')}` +
+          meetLink,
+        refs: {
+          id: data.id,
+          eventId: data.id ?? eventId,
+          calendarId,
+          changed,
+          ...(data.hangoutLink ? { meetLink: data.hangoutLink } : {}),
+        },
       };
     },
   },

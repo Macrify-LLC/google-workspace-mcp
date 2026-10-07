@@ -1,3 +1,4 @@
+import { describe, expect, it } from 'vitest';
 import {
   formatEmailList, formatEmailDetail,
   formatEventList, formatEventDetail,
@@ -19,10 +20,23 @@ describe('formatEmailList', () => {
     expect(result.refs.messageId).toBe('msg-1');
   });
 
-  it('handles empty messages', () => {
-    expect(formatEmailList({}).text).toBe('No messages found.');
-    expect(formatEmailList({ messages: [] }).text).toBe('No messages found.');
-    expect(formatEmailList({}).refs.count).toBe(0);
+  it('handles empty messages with valid API response', () => {
+    const result = formatEmailList({ messages: [], resultSizeEstimate: 0, query: 'from:nobody' });
+    expect(result.text).toBe('No messages found for query: "from:nobody".');
+    expect(result.refs.count).toBe(0);
+    expect(result.refs.apiResponseValid).toBe(true);
+  });
+
+  it('flags suspicious empty response missing expected fields', () => {
+    const result = formatEmailList({});
+    expect(result.text).toContain('authentication or scope issue');
+    expect(result.refs.apiResponseValid).toBe(false);
+  });
+
+  it('handles valid empty response without query', () => {
+    const result = formatEmailList({ messages: [], resultSizeEstimate: 0 });
+    expect(result.text).toBe('No messages found.');
+    expect(result.refs.apiResponseValid).toBe(true);
   });
 
   it('falls back to items array', () => {
@@ -66,6 +80,111 @@ describe('formatEmailDetail', () => {
     expect(result.text).toContain('**From:**');
     expect(result.refs.from).toBe('');
   });
+
+  it('extracts full body from text/plain payload part', () => {
+    const fullText = 'Hello Aaron, your invoice has been approved. Please include your Tax ID on future invoices.';
+    const base64Body = Buffer.from(fullText).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const result = formatEmailDetail({
+      id: 'msg-2', threadId: 'thread-2', snippet: 'Hello Aaron, your invoice has been',
+      payload: {
+        headers: [{ name: 'From', value: 'val@jvl.ca' }, { name: 'Subject', value: 'Invoice' }],
+        mimeType: 'multipart/alternative',
+        parts: [
+          { mimeType: 'text/plain', body: { data: base64Body, size: fullText.length } },
+          { mimeType: 'text/html', body: { data: base64Body, size: fullText.length } },
+        ],
+      },
+    });
+    expect(result.text).toContain('Tax ID on future invoices');
+    expect(result.text).not.toContain('Showing snippet only');
+    expect(result.refs.bodyTruncated).toBe(false);
+  });
+
+  it('falls back to snippet when payload has no body data', () => {
+    const result = formatEmailDetail({
+      id: 'msg-3', snippet: 'Snippet fallback',
+      payload: {
+        headers: [{ name: 'From', value: 'a@b.com' }],
+      },
+    });
+    expect(result.text).toContain('Snippet fallback');
+  });
+
+  it('with bodyFormat: html, prefers text/html and returns it sanitized + wrapped', () => {
+    const htmlBody = '<p>The party is <b>Saturday at 7pm</b>.</p><script>alert(1)</script>';
+    const base64 = (s: string) => Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const result = formatEmailDetail({
+      id: 'msg-html', threadId: 'th', snippet: 'View this email',
+      payload: {
+        headers: [{ name: 'From', value: 'invites@paperlesspost.com' }, { name: 'Subject', value: 'You\'re invited' }],
+        mimeType: 'multipart/alternative',
+        parts: [
+          { mimeType: 'text/plain', body: { data: base64('View this email in your browser.'), size: 32 } },
+          { mimeType: 'text/html', body: { data: base64(htmlBody), size: htmlBody.length } },
+        ],
+      },
+    }, { bodyFormat: 'html' });
+    expect(result.text).toContain('Saturday at 7pm');
+    expect(result.text).toContain('<gmail_content trust="untrusted">');
+    expect(result.text).not.toContain('<script>');
+    expect(result.text).not.toContain('alert(1)');
+    // Crucially: the stub text/plain body ("View this email in your browser") is bypassed.
+    expect(result.text).not.toContain('View this email in your browser');
+  });
+
+  it('with bodyFormat: html and no html part, falls back to the text/plain part', () => {
+    const plain = 'Just plain text here.';
+    const base64 = (s: string) => Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const result = formatEmailDetail({
+      id: 'msg-plain-only',
+      payload: {
+        headers: [{ name: 'From', value: 'a@b.com' }],
+        mimeType: 'multipart/alternative',
+        parts: [
+          { mimeType: 'text/plain', body: { data: base64(plain), size: plain.length } },
+        ],
+      },
+    }, { bodyFormat: 'html' });
+    expect(result.text).toContain('Just plain text here');
+    expect(result.text).not.toContain('<gmail_content');
+  });
+
+  it('default bodyFormat (plain) is unchanged — no Spotlighting wrapper, no HTML', () => {
+    const plain = 'Hello plain world.';
+    const base64 = (s: string) => Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const result = formatEmailDetail({
+      id: 'msg-default',
+      payload: {
+        headers: [{ name: 'From', value: 'a@b.com' }],
+        mimeType: 'multipart/alternative',
+        parts: [
+          { mimeType: 'text/plain', body: { data: base64(plain), size: plain.length } },
+          { mimeType: 'text/html', body: { data: base64('<p>Hello <b>HTML</b> world.</p>'), size: 30 } },
+        ],
+      },
+    });
+    expect(result.text).toContain('Hello plain world');
+    expect(result.text).not.toContain('<gmail_content');
+    expect(result.text).not.toContain('<p>');
+  });
+
+  it('shows snippet with size hint for very large bodies', () => {
+    // Generate a body larger than 12k tokens (~48KB+)
+    const largeText = 'x'.repeat(60_000);
+    const base64Body = Buffer.from(largeText).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const result = formatEmailDetail({
+      id: 'msg-4', snippet: 'This is the snippet',
+      payload: {
+        headers: [{ name: 'From', value: 'a@b.com' }],
+        body: { data: base64Body, size: largeText.length },
+      },
+    });
+    expect(result.text).toContain('This is the snippet');
+    expect(result.text).toContain('Showing snippet only');
+    expect(result.text).toContain('tokens');
+    expect(result.refs.bodyTruncated).toBe(true);
+    expect(result.refs.fullBodyTokens).toBeGreaterThan(12_000);
+  });
 });
 
 describe('formatEventList', () => {
@@ -87,6 +206,24 @@ describe('formatEventList', () => {
   it('handles missing title', () => {
     const result = formatEventList({ items: [{ id: 'x', start: {}, end: {} }] });
     expect(result.text).toContain('(no title)');
+  });
+
+  it('renders an all-day event as its date, not a shifted local time', () => {
+    // A bare `date` parsed as UTC midnight would render as the previous evening
+    // in most timezones ("Aug 19 20:00" etc.) — all-day must show the date.
+    const result = formatEventList({
+      items: [{ id: 'evt-1', summary: 'Lunch', start: { date: '2026-08-20' }, end: { date: '2026-08-21' } }],
+    });
+    expect(result.text).toContain('Thu, Aug 20 (all day)');
+    expect(result.text).not.toContain('20:00');
+  });
+
+  it('renders a multi-day all-day range with the exclusive end minus one day', () => {
+    const result = formatEventList({
+      items: [{ id: 'evt-1', summary: 'Trip', start: { date: '2026-08-20' }, end: { date: '2026-08-23' } }],
+    });
+    // API end is exclusive: 2026-08-23 means the last day is the 22nd.
+    expect(result.text).toContain('Thu, Aug 20 – Sat, Aug 22 (all day)');
   });
 
   it('handles empty items', () => {
@@ -116,6 +253,15 @@ describe('formatEventDetail', () => {
   it('handles missing conference data', () => {
     const result = formatEventDetail({ id: 'x', start: {}, end: {} });
     expect(result.refs.meetLink).toBeUndefined();
+  });
+
+  it('renders an all-day event detail as its date', () => {
+    const result = formatEventDetail({
+      id: 'evt-1', summary: 'Holiday',
+      start: { date: '2026-08-20' }, end: { date: '2026-08-21' },
+    });
+    expect(result.text).toContain('**When:** Thu, Aug 20 (all day)');
+    expect(result.refs.start).toBe('2026-08-20');
   });
 
   it('shows declined attendees with [-] marker', () => {

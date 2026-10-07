@@ -36,7 +36,7 @@ const suggestions: Record<string, Record<string, NextStep[]>> = {
     scopes: [
       { description: 'Verify new scopes', tool: 'manage_accounts', example: { operation: 'status', email: '<email>' } },
     ],
-    // Auth error guidance — used by server.ts when GwsError has exit code 2
+    // Auth error guidance — used by server.ts when Google reports an auth error
     auth_error: [
       { description: 'Re-authenticate account', tool: 'manage_accounts', example: { operation: 'authenticate' } },
       { description: 'Check account status', tool: 'manage_accounts', example: { operation: 'status', email: '<email>' } },
@@ -49,6 +49,7 @@ const suggestions: Record<string, Record<string, NextStep[]>> = {
     ],
     read: [
       { description: 'Reply to this email', tool: 'manage_email', example: { operation: 'reply', email: '<email>', messageId: '<messageId>', body: '<reply text>' } },
+      { description: 'Import into scratchpad for editing', tool: 'manage_scratchpad', example: { operation: 'import', source: 'email', sourceParams: { email: '<email>', messageId: '<messageId>' } } },
       { description: 'Search for related emails', tool: 'manage_email', example: { operation: 'search', email: '<email>', query: 'thread:<threadId>' } },
     ],
     send: [
@@ -60,6 +61,14 @@ const suggestions: Record<string, Record<string, NextStep[]>> = {
     triage: [
       { description: 'Read a specific email', tool: 'manage_email', example: { operation: 'read', email: '<email>', messageId: '<id from results>' } },
       { description: 'Search for specific emails', tool: 'manage_email', example: { operation: 'search', email: '<email>', query: '<query>' } },
+    ],
+    listDrafts: [
+      { description: 'Delete a draft', tool: 'manage_email', example: { operation: 'deleteDraft', email: '<email>', draftId: '<draftId from results>' } },
+      { description: 'Compose a new email', tool: 'manage_email', example: { operation: 'send', email: '<email>', to: '<recipient>', subject: '<subject>', body: '<body>' } },
+    ],
+    deleteDraft: [
+      { description: 'List remaining drafts', tool: 'manage_email', example: { operation: 'listDrafts', email: '<email>' } },
+      { description: 'Compose a new email', tool: 'manage_email', example: { operation: 'send', email: '<email>', to: '<recipient>', subject: '<subject>', body: '<body>' } },
     ],
   },
   calendar: {
@@ -124,6 +133,87 @@ const suggestions: Record<string, Record<string, NextStep[]>> = {
     ],
     download: [
       { description: 'Search for more files', tool: 'manage_drive', example: { operation: 'search', email: '<email>' } },
+    ],
+    createFolder: [
+      { description: 'Upload a file into this folder', tool: 'manage_drive', example: { operation: 'upload', email: '<email>', filePath: '<local path>', parentFolderId: '<folderId>' } },
+      { description: 'List the folder contents', tool: 'manage_drive', example: { operation: 'listFolder', email: '<email>', folderId: '<folderId>' } },
+    ],
+    listFolder: [
+      { description: 'View the whole tree', tool: 'manage_drive', example: { operation: 'tree', email: '<email>', folderId: '<folderId>' } },
+      { description: 'Get file details', tool: 'manage_drive', example: { operation: 'get', email: '<email>', fileId: '<id from results>' } },
+    ],
+    tree: [
+      { description: 'List a single level', tool: 'manage_drive', example: { operation: 'listFolder', email: '<email>', folderId: '<folderId>' } },
+    ],
+    trash: [
+      { description: 'Find trashed items', tool: 'manage_drive', example: { operation: 'search', email: '<email>', query: 'trashed=true' } },
+    ],
+    setRole: [
+      { description: 'List current permissions', tool: 'manage_drive', example: { operation: 'listPermissions', email: '<email>', fileId: '<fileId>' } },
+    ],
+  },
+  sheets: {
+    create: [
+      { description: 'Write values', tool: 'manage_sheets', example: { operation: 'updateValues', email: '<email>', spreadsheetId: '<spreadsheetId>', range: 'Sheet1!A1', jsonValues: '[["header1","header2"]]' } },
+      { description: 'Append rows', tool: 'manage_sheets', example: { operation: 'append', email: '<email>', spreadsheetId: '<spreadsheetId>', jsonValues: '[["a","b"]]' } },
+    ],
+    get: [
+      { description: 'Read a range', tool: 'manage_sheets', example: { operation: 'read', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<Sheet1!A1:Z>' } },
+      { description: 'Append rows', tool: 'manage_sheets', example: { operation: 'append', email: '<email>', spreadsheetId: '<spreadsheetId>', jsonValues: '[["a","b"]]' } },
+    ],
+    read: [
+      { description: 'Write values to a range', tool: 'manage_sheets', example: { operation: 'updateValues', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<range>', jsonValues: '[["a","b"]]' } },
+      { description: 'Append more rows', tool: 'manage_sheets', example: { operation: 'append', email: '<email>', spreadsheetId: '<spreadsheetId>', jsonValues: '[["a","b"]]' } },
+    ],
+    getValues: [
+      { description: 'Write values to a range', tool: 'manage_sheets', example: { operation: 'updateValues', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<range>', jsonValues: '[["a","b"]]' } },
+    ],
+    append: [
+      { description: 'Read back what was written', tool: 'manage_sheets', example: { operation: 'read', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<Sheet1!A1:Z>' } },
+    ],
+    updateValues: [
+      { description: 'Read back what was written', tool: 'manage_sheets', example: { operation: 'read', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<range>' } },
+    ],
+    addSheet: [
+      { description: 'Write to the new tab', tool: 'manage_sheets', example: { operation: 'updateValues', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<NewTab!A1>', jsonValues: '[["a","b"]]' } },
+      { description: 'Inspect all tabs', tool: 'manage_sheets', example: { operation: 'get', email: '<email>', spreadsheetId: '<spreadsheetId>' } },
+    ],
+    renameSheet: [
+      { description: 'Verify new tab name', tool: 'manage_sheets', example: { operation: 'get', email: '<email>', spreadsheetId: '<spreadsheetId>' } },
+    ],
+    deleteSheet: [
+      { description: 'Verify remaining tabs', tool: 'manage_sheets', example: { operation: 'get', email: '<email>', spreadsheetId: '<spreadsheetId>' } },
+    ],
+    duplicateSheet: [
+      { description: 'Read back copied data', tool: 'manage_sheets', example: { operation: 'read', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<NewTab!A1:Z>' } },
+    ],
+    renameSpreadsheet: [
+      { description: 'Verify the new title', tool: 'manage_sheets', example: { operation: 'get', email: '<email>', spreadsheetId: '<spreadsheetId>' } },
+    ],
+    clearValues: [
+      { description: 'Confirm range is empty', tool: 'manage_sheets', example: { operation: 'read', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<range>' } },
+      { description: 'Write new values', tool: 'manage_sheets', example: { operation: 'updateValues', email: '<email>', spreadsheetId: '<spreadsheetId>', range: '<range>', jsonValues: '[["a","b"]]' } },
+    ],
+    copySheetTo: [
+      { description: 'Open the destination spreadsheet', tool: 'manage_sheets', example: { operation: 'get', email: '<email>', spreadsheetId: '<destinationSpreadsheetId>' } },
+    ],
+  },
+  scratchpad: {
+    create: [
+      { description: 'Add content', tool: 'manage_scratchpad', example: { operation: 'append_lines', scratchpadId: '<scratchpadId>', content: '<text>' } },
+      { description: 'Import from a document', tool: 'manage_scratchpad', example: { operation: 'import', scratchpadId: '<scratchpadId>', source: 'doc', sourceParams: { email: '<email>', documentId: '<documentId>' } } },
+    ],
+    append_lines: [
+      { description: 'View buffer', tool: 'manage_scratchpad', example: { operation: 'view', scratchpadId: '<scratchpadId>' } },
+      { description: 'Send as email', tool: 'manage_scratchpad', example: { operation: 'send', scratchpadId: '<scratchpadId>', target: 'email', targetParams: { email: '<email>', to: '<recipient>', subject: '<subject>' } } },
+    ],
+    send: [
+      { description: 'Send to another target', tool: 'manage_scratchpad', example: { operation: 'send', scratchpadId: '<scratchpadId>', target: 'workspace', targetParams: { filename: '<name>.md' } } },
+      { description: 'Discard scratchpad', tool: 'manage_scratchpad', example: { operation: 'discard', scratchpadId: '<scratchpadId>' } },
+    ],
+    import: [
+      { description: 'View imported content', tool: 'manage_scratchpad', example: { operation: 'view', scratchpadId: '<scratchpadId>' } },
+      { description: 'Edit content', tool: 'manage_scratchpad', example: { operation: 'replace_lines', scratchpadId: '<scratchpadId>', startLine: 1, endLine: 1, content: '<new text>' } },
     ],
   },
 };

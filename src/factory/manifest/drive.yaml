@@ -1,0 +1,379 @@
+tool_name: manage_drive
+description: "Search, upload, download, share, comment on, or manage files in Google Drive."
+requires_email: true
+google_service: drive
+operations:
+
+  # --- File discovery ---
+
+  search:
+    type: list
+    description: "find files by query"
+    resource: files.list
+    params:
+      query:
+        type: string
+        description: "Drive search query (e.g. \"name contains 'budget'\" or \"mimeType='application/pdf'\")"
+        maps_to: q
+      maxResults:
+        type: number
+        description: "Max results (default: 10, max: 50)"
+        default: 10
+        max: 50
+        maps_to: pageSize
+    defaults:
+      fields: "files(id, name, mimeType, modifiedTime, size, webViewLink)"
+      supportsAllDrives: true
+      includeItemsFromAllDrives: true
+
+  get:
+    type: detail
+    description: "get file metadata"
+    resource: files.get
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+    defaults:
+      fields: "id, name, mimeType, modifiedTime, size, webViewLink, owners, shared, parents"
+      supportsAllDrives: true
+
+  # --- File operations ---
+
+  upload:
+    type: action
+    description: "upload a local file to Drive"
+    params:
+      filePath:
+        type: string
+        description: "Local file path to upload"
+        required: true
+      name:
+        type: string
+        description: "File name in Drive. On `upload`, defaults to the local file's name. On `copy`, the name for the copy — without it Drive names it 'Copy of <original>'. On `update`, the new name (a rename). On `createFolder`, the folder name."
+      parentFolderId:
+        type: string
+        description: "Destination folder ID. On `upload`, places the file in this folder. On `copy`, defaults to the source file's folder. On `createFolder`, nests the new folder under this parent."
+
+  viewImage:
+    type: detail
+    description: "view an image file inline without saving to workspace (png, jpg, gif, webp). Use for quick preview — use download to save."
+    resource: files.get
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+    defaults:
+      supportsAllDrives: true
+
+  download:
+    type: detail
+    description: "download file content to local path"
+    resource: files.get
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      outputPath:
+        type: string
+        description: "Local path to save the file"
+    defaults:
+      alt: media
+      supportsAllDrives: true
+
+  copy:
+    type: action
+    description: "create a copy of a file (set name to rename the copy; parentFolderId to place it in a folder)"
+    resource: files.copy
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      name:
+        type: string
+        description: "File name in Drive. On `upload`, defaults to the local file's name. On `copy`, the name for the copy — without it Drive names it 'Copy of <original>'. On `update`, the new name (a rename). On `createFolder`, the folder name."
+      parentFolderId:
+        type: string
+        description: "Destination folder ID. On `upload`, places the file in this folder. On `copy`, defaults to the source file's folder. On `createFolder`, nests the new folder under this parent."
+    defaults:
+      supportsAllDrives: true
+
+  update:
+    type: action
+    description: "rename a file (set name) and/or move it between folders (addParents / removeParents — to move, set both)"
+    resource: files.update
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      name:
+        type: string
+        description: "File name in Drive. On `upload`, defaults to the local file's name. On `copy`, the name for the copy — without it Drive names it 'Copy of <original>'. On `update`, the new name (a rename). On `createFolder`, the folder name."
+      addParents:
+        type: string
+        description: "Comma-separated folder ID(s) to add as parents (move into a folder)"
+      removeParents:
+        type: string
+        description: "Comma-separated folder ID(s) to remove as parents (move out of a folder)"
+    defaults:
+      supportsAllDrives: true
+
+  delete:
+    type: action
+    description: "permanently delete a file (cannot be undone)"
+    resource: files.delete
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+    defaults:
+      supportsAllDrives: true
+
+  trash:
+    type: action
+    description: "move a file or folder to trash (recoverable for 30 days — use instead of delete when you only need to remove it)"
+    resource: files.update
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+
+  export:
+    type: action
+    description: "export a Google Workspace document (Docs, Sheets, Slides) to a file format"
+    resource: files.export
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      mimeType:
+        type: string
+        description: "Target format (e.g. application/pdf, text/csv, text/plain, application/vnd.openxmlformats-officedocument.wordprocessingml.document)"
+        required: true
+      outputPath:
+        type: string
+        description: "Local path to save the file"
+    defaults:
+      supportsAllDrives: true
+
+  # --- Folders ---
+
+  createFolder:
+    type: action
+    description: "create a new folder (optionally nested under a parent folder)"
+    resource: files.create
+    params:
+      name:
+        type: string
+        description: "File name in Drive. On `upload`, defaults to the local file's name. On `copy`, the name for the copy — without it Drive names it 'Copy of <original>'. On `update`, the new name (a rename). On `createFolder`, the folder name."
+        required: true
+      parentFolderId:
+        type: string
+        description: "Destination folder ID. On `upload`, places the file in this folder. On `copy`, defaults to the source file's folder. On `createFolder`, nests the new folder under this parent."
+
+  listFolder:
+    type: list
+    description: "list the files and subfolders directly inside a folder"
+    resource: files.list
+    params:
+      folderId:
+        type: string
+        description: "Folder ID (pass the id returned by createFolder or search)"
+        required: true
+
+  tree:
+    type: list
+    description: "print a recursive folder tree and count the files (subfolders excluded from the count)"
+    resource: files.list
+    params:
+      folderId:
+        type: string
+        description: "Folder ID (pass the id returned by createFolder or search)"
+        required: true
+      maxDepth:
+        type: number
+        description: "How many folder levels to descend (default 10). The tree is labelled partial when this limit stops the walk."
+
+
+  # --- Sharing ---
+
+  listPermissions:
+    type: list
+    description: "list sharing permissions on a file"
+    resource: permissions.list
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+    defaults:
+      supportsAllDrives: true
+
+  share:
+    type: action
+    description: "share a file with a user, group, domain, or anyone"
+    resource: permissions.create
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      shareEmail:
+        type: string
+        description: "Email address of the collaborator. On `share`, required when type is 'user' or 'group'; omit for 'domain' (use the `domain` param) or 'anyone'. On `setRole`, the existing collaborator whose role to change."
+      role:
+        type: string
+        description: "Permission level. On `share`, the level to grant — defaults to `reader`. On `setRole`, the new level, and it is REQUIRED there: with no default to fall back on, an omitted role would silently demote the collaborator, and setRole sends no notification."
+        enum: [reader, commenter, writer, organizer]
+        default: reader
+      type:
+        type: string
+        description: "Permission type (default: 'user'). Use 'group' for Google Groups, 'domain' to share with an entire G Suite domain, 'anyone' for public links."
+        enum: [user, group, domain, anyone]
+        default: user
+      domain:
+        type: string
+        description: "Domain name (required when type is 'domain')."
+    defaults:
+      supportsAllDrives: true
+
+  unshare:
+    type: action
+    description: "remove sharing permission from a file"
+    resource: permissions.delete
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      permissionId:
+        type: string
+        description: "Permission ID to remove (from listPermissions)"
+        required: true
+    defaults:
+      supportsAllDrives: true
+
+  setRole:
+    type: action
+    description: "change an existing collaborator's role (no notification email is sent)"
+    resource: permissions.update
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      shareEmail:
+        type: string
+        description: "Email address of the collaborator. On `share`, required when type is 'user' or 'group'; omit for 'domain' (use the `domain` param) or 'anyone'. On `setRole`, the existing collaborator whose role to change."
+        required: true
+      role:
+        type: string
+        description: "Permission level. On `share`, the level to grant — defaults to `reader`. On `setRole`, the new level, and it is REQUIRED there: with no default to fall back on, an omitted role would silently demote the collaborator, and setRole sends no notification."
+        enum: [reader, commenter, writer, organizer]
+        default: reader
+        required: true
+
+  # --- Comments ---
+
+  listComments:
+    type: list
+    description: "list comments on a file"
+    resource: comments.list
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      includeDeleted:
+        type: boolean
+        description: "Include deleted comments (default: false)"
+    defaults:
+      fields: "comments(id, content, htmlContent, author(displayName, emailAddress), createdTime, modifiedTime, resolved, quotedFileContent, replies(id, content, htmlContent, author(displayName), createdTime)), nextPageToken"
+      supportsAllDrives: true
+
+  getComment:
+    type: detail
+    description: "get a specific comment by ID"
+    resource: comments.get
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      commentId:
+        type: string
+        description: "Comment ID"
+        required: true
+    defaults:
+      fields: "id, content, htmlContent, author(displayName, emailAddress), createdTime, modifiedTime, resolved, quotedFileContent, replies(id, content, htmlContent, author(displayName), createdTime)"
+      supportsAllDrives: true
+
+  addComment:
+    type: action
+    description: "add a comment to a file (optionally anchored to quoted text)"
+    resource: comments.create
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      content:
+        type: string
+        description: "Comment text. On `replyToComment`, the reply text."
+        required: true
+      quotedText:
+        type: string
+        description: "Text to anchor the comment to (optional — if provided, comment is anchored to first occurrence)"
+    defaults:
+      fields: "id, content, htmlContent, author(displayName), createdTime, quotedFileContent"
+      supportsAllDrives: true
+
+  resolveComment:
+    type: action
+    description: "resolve or reopen a comment"
+    resource: comments.update
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      commentId:
+        type: string
+        description: "Comment ID"
+        required: true
+      resolved:
+        type: boolean
+        description: "true to resolve, false to reopen"
+        required: true
+    defaults:
+      fields: "id, content, resolved"
+      supportsAllDrives: true
+
+  replyToComment:
+    type: action
+    description: "reply to an existing comment"
+    resource: replies.create
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      commentId:
+        type: string
+        description: "Comment ID"
+        required: true
+      content:
+        type: string
+        description: "Comment text. On `replyToComment`, the reply text."
+        required: true
+    defaults:
+      fields: "id, content, htmlContent, author(displayName), createdTime"
+      supportsAllDrives: true

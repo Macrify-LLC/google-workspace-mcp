@@ -6,6 +6,7 @@
  * resolution and text for the final response.
  */
 
+import { advanceEpoch } from './handler.js';
 import type { HandlerResponse } from './handler.js';
 
 type ToolHandler = (params: Record<string, unknown>) => Promise<HandlerResponse>;
@@ -32,10 +33,30 @@ function stripNextSteps(text: string): string {
   return idx >= 0 ? text.slice(0, idx) : text;
 }
 
+/**
+ * How deeply queues may nest.
+ *
+ * A queue is a tool call, so a queue can hold one — that is what makes the tool list
+ * uniform, and it is useful: a nested queue with `onError: 'continue'` fails inside
+ * itself without bailing its parent. What it cannot be is unbounded, because each level
+ * multiplies: 10 operations per queue means this ceiling is 1,000 calls, which is already
+ * more than any real workflow and enough to be worth naming.
+ */
+const MAX_QUEUE_DEPTH = 3;
+
 export async function handleQueue(
   params: Record<string, unknown>,
   handlers: Record<string, ToolHandler>,
+  depth = 1,
 ): Promise<HandlerResponse> {
+  if (depth > MAX_QUEUE_DEPTH) {
+    throw new Error(
+      `bulk_operations nested more than ${MAX_QUEUE_DEPTH} deep. Each level multiplies the ` +
+      `work — at 10 operations per queue that ceiling is already 1,000 calls. Flatten the ` +
+      `inner queues into their parent.`,
+    );
+  }
+
   const operations = params.operations as QueueOperation[];
   if (!Array.isArray(operations) || operations.length === 0) {
     throw new Error('operations array is required and must not be empty');
@@ -75,8 +96,20 @@ export async function handleQueue(
     }
 
     try {
+      advanceEpoch(); // Each queued operation is a logical tool call
       const response = await handler(resolvedArgs);
       const text = stripNextSteps(response.text);
+
+      // A safety policy declines by RETURNING, not by throwing, so the catch below never
+      // sees it. Counting that as a success made a queue report "2/2 succeeded" having
+      // written nothing, and left `onError: 'bail'` running the rest of a queue whose
+      // first step was refused.
+      if (response.refs?.blocked) {
+        results.push({ index: i, tool: op.tool, status: 'error', error: text });
+        if (errorStrategy === 'bail') bailedAt = i;
+        continue;
+      }
+
       results.push({ index: i, tool: op.tool, status: 'success', text, refs: response.refs });
       lastSuccessText = response.text; // keep next-steps from last success
     } catch (err) {

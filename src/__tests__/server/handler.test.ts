@@ -1,34 +1,30 @@
-// Mock registry before handler imports it — avoids import.meta.url in Jest
-jest.mock('../../factory/registry.js', () => {
-  const { loadManifest, generateTools } = jest.requireActual('../../factory/generator.js');
-  const { patches } = jest.requireActual('../../factory/patches.js');
-  const manifest = loadManifest();
-  return { manifest, generatedTools: generateTools(manifest, patches) };
-});
+import { beforeEach, describe, expect, it, vi, type MockedFunction, type Mock } from 'vitest';
 
 import { handleToolCall } from '../../server/handler.js';
 import type { HandlerResponse } from '../../server/handler.js';
 
-// Mock gws executor — all factory-generated handlers call through here
-jest.mock('../../executor/gws.js');
+// ONE seam (ADR-103): every factory-generated operation — gmail triage, calendar
+// list, drive search — reaches Google through the client we own. Nothing shells
+// out, so there is no executor to mock.
+vi.mock('../../google/client.js');
 // Mock accounts handler — still hand-coded
-jest.mock('../../server/handlers/accounts.js');
+vi.mock('../../server/handlers/accounts.js');
 // Mock queue handler — still hand-coded
-jest.mock('../../server/queue.js');
+vi.mock('../../server/queue.js');
 
-import { execute } from '../../executor/gws.js';
+import { call } from '../../google/client.js';
 import { handleAccounts } from '../../server/handlers/accounts.js';
 import { handleQueue } from '../../server/queue.js';
 
-const mockExecute = execute as jest.MockedFunction<typeof execute>;
-const mockAccounts = handleAccounts as jest.MockedFunction<typeof handleAccounts>;
-const mockQueue = handleQueue as jest.MockedFunction<typeof handleQueue>;
+const mockCall = call as MockedFunction<typeof call>;
+const mockAccounts = handleAccounts as MockedFunction<typeof handleAccounts>;
+const mockQueue = handleQueue as MockedFunction<typeof handleQueue>;
 
 const stubResponse: HandlerResponse = { text: 'ok', refs: {} };
 
 describe('handleToolCall', () => {
   beforeEach(() => {
-    jest.resetAllMocks();
+    vi.resetAllMocks();
   });
 
   it('routes manage_accounts to handleAccounts', async () => {
@@ -38,50 +34,95 @@ describe('handleToolCall', () => {
     await handleToolCall('manage_accounts', params);
 
     expect(mockAccounts).toHaveBeenCalledWith(params);
-    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockCall).not.toHaveBeenCalled();
+  });
+
+  it('hands the queue every tool, itself included, and deepens on nesting', async () => {
+    // The queue's own tests build their nesting helper by hand, so they pass whether or
+    // not handler.ts actually wires one up. This is the only place the production wiring
+    // is pinned: without it, `queue_operations` inside a queue answers "Unknown tool" for
+    // a tool the server advertises.
+    mockQueue.mockResolvedValue(stubResponse);
+
+    await handleToolCall('bulk_operations', { operations: [] });
+
+    const [, handlers, depth] = mockQueue.mock.calls[0];
+    expect(depth).toBe(1);
+    expect(Object.keys(handlers)).toEqual(expect.arrayContaining([
+      'bulk_operations', 'queue_operations', 'manage_contacts', 'manage_email', 'manage_accounts',
+    ]));
+
+    // The nested handler must recurse one level deeper, or the bound never bites.
+    await handlers.bulk_operations({ operations: [] });
+    expect(mockQueue.mock.calls[1][2]).toBe(2);
+  });
+
+  it('routes the queue_operations alias to the same handler (ADR-308)', async () => {
+    // Advertising the old name is not enough — it has to dispatch. A schema-only alias
+    // would list in tools/list and then answer "Unknown tool" when called.
+    mockQueue.mockResolvedValue(stubResponse);
+
+    await handleToolCall('queue_operations', { operations: [] });
+
+    expect(mockQueue).toHaveBeenCalledTimes(1);
+    expect(mockQueue.mock.calls[0][2]).toBe(1);
+  });
+
+  it('lets the old name nest too, so an agent that learned it is not broken one level down', async () => {
+    mockQueue.mockResolvedValue(stubResponse);
+
+    await handleToolCall('bulk_operations', { operations: [] });
+    const [, handlers] = mockQueue.mock.calls[0];
+
+    await handlers.queue_operations({ operations: [] });
+    expect(mockQueue.mock.calls[1][2]).toBe(2);
   });
 
   it('routes manage_email to factory-generated handler', async () => {
-    // Factory handler calls execute() for triage (helper: +triage)
-    mockExecute.mockResolvedValue({
-      success: true,
-      data: { messages: [] },
-      stderr: '',
-    });
+    // triage is a resource op: users.messages.list with an unread-inbox query.
+    mockCall.mockResolvedValue({ messages: [] });
     const params = { operation: 'triage', email: 'u@t.com' };
 
     const result = await handleToolCall('manage_email', params);
 
-    expect(mockExecute).toHaveBeenCalled();
+    expect(mockCall).toHaveBeenCalledWith(
+      'gmail',
+      'users.messages.list',
+      expect.objectContaining({ userId: 'me', q: 'is:unread in:inbox' }),
+      expect.objectContaining({ account: 'u@t.com' }),
+    );
     expect(result).toHaveProperty('text');
     expect(result).toHaveProperty('refs');
   });
 
   it('routes manage_calendar to factory-generated handler', async () => {
-    mockExecute.mockResolvedValue({
-      success: true,
-      data: { items: [] },
-      stderr: '',
-    });
+    // `list` is a resource op — it reaches Google through the client.
+    mockCall.mockResolvedValue({ items: [] });
     const params = { operation: 'list', email: 'u@t.com' };
 
     const result = await handleToolCall('manage_calendar', params);
 
-    expect(mockExecute).toHaveBeenCalled();
+    expect(mockCall).toHaveBeenCalledWith(
+      'calendar',
+      'events.list',
+      expect.any(Object),
+      expect.objectContaining({ account: 'u@t.com' }),
+    );
     expect(result).toHaveProperty('text');
   });
 
   it('routes manage_drive to factory-generated handler', async () => {
-    mockExecute.mockResolvedValue({
-      success: true,
-      data: { files: [] },
-      stderr: '',
-    });
+    mockCall.mockResolvedValue({ files: [] });
     const params = { operation: 'search', email: 'u@t.com' };
 
     const result = await handleToolCall('manage_drive', params);
 
-    expect(mockExecute).toHaveBeenCalled();
+    expect(mockCall).toHaveBeenCalledWith(
+      'drive',
+      'files.list',
+      expect.any(Object),
+      expect.objectContaining({ account: 'u@t.com' }),
+    );
     expect(result).toHaveProperty('text');
   });
 
@@ -96,15 +137,15 @@ describe('handleToolCall', () => {
       manage_email: expect.any(Function),
       manage_calendar: expect.any(Function),
       manage_drive: expect.any(Function),
-    }));
+    }), 1);   // depth: a top-level queue starts at 1
   });
 
   it('throws on unknown tool name', async () => {
     await expect(handleToolCall('nonexistent', {})).rejects.toThrow('Unknown tool: nonexistent');
   });
 
-  it('propagates executor errors through factory handler', async () => {
-    mockExecute.mockRejectedValue(new Error('API failure'));
+  it('propagates Google API errors through factory handler', async () => {
+    mockCall.mockRejectedValue(new Error('API failure'));
 
     await expect(
       handleToolCall('manage_email', { operation: 'triage', email: 'u@t.com' }),
@@ -112,15 +153,22 @@ describe('handleToolCall', () => {
   });
 
   it('returns HandlerResponse with text and refs from factory handler', async () => {
-    mockExecute.mockResolvedValue({
-      success: true,
-      data: { messages: [{ id: 'msg-1', from: 'alice', subject: 'test', date: '2024-01-01' }] },
-      stderr: '',
+    // Real Gmail shape: messages.list hands back bare IDs, and the gmail patch's
+    // afterExecute hydrates each one via messages.get.
+    mockCall.mockResolvedValueOnce({ messages: [{ id: 'msg-1' }] });
+    mockCall.mockResolvedValueOnce({
+      id: 'msg-1', threadId: 't1', snippet: 'test',
+      payload: { headers: [
+        { name: 'From', value: 'alice@t.com' },
+        { name: 'Subject', value: 'test' },
+        { name: 'Date', value: '2024-01-01' },
+      ]},
     });
 
     const result = await handleToolCall('manage_email', { operation: 'triage', email: 'u@t.com' });
 
     expect(result.text).toContain('msg-1');
+    expect(result.text).toContain('alice@t.com');
     expect(result.refs).toHaveProperty('count', 1);
   });
 });
