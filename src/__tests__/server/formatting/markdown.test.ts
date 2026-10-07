@@ -66,8 +66,11 @@ describe('formatEmailDetail', () => {
         ],
       },
     });
-    expect(result.text).toContain('## Test');
-    expect(result.text).toContain('**From:** alice@test.com');
+    // [Macrify] subject and sender are wrapped as untrusted external content.
+    expect(result.text).toContain('## [EXTERNAL DATA from email subject');
+    expect(result.text).toContain('\nTest\n[END EXTERNAL DATA]');
+    expect(result.text).toContain('**From:** [EXTERNAL DATA from email sender');
+    expect(result.text).toContain('\nalice@test.com\n[END EXTERNAL DATA]');
     expect(result.text).toContain('**Labels:** INBOX');
     expect(result.text).toContain('Preview');
     expect(result.refs.from).toBe('alice@test.com');
