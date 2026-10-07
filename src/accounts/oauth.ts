@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { platform } from 'node:os';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/auth';
@@ -23,7 +23,65 @@ export const SERVICE_SCOPE_MAP: Record<string, string[]> = {
     'https://www.googleapis.com/auth/meetings.space.readonly',
     'https://www.googleapis.com/auth/meetings.space.settings',
   ],
+  // manage_contacts reads three separate collections and Google gates each behind its
+  // own scope: your saved contacts, the addresses you have only corresponded with, and
+  // the organization directory. Two of the three have no write form at all.
+  contacts: [
+    'https://www.googleapis.com/auth/contacts',
+    'https://www.googleapis.com/auth/contacts.other.readonly',
+    'https://www.googleapis.com/auth/directory.readonly',
+  ],
 };
+
+/**
+ * Service name → READ-ONLY scope URL(s), for accounts authorized with `access: 'read'`.
+ *
+ * A service is missing from this map when Google offers no read-only scope for it. That
+ * is NOT treated as "use the read/write scope and say nothing": someone who asked for
+ * read access would get write access without being told. `scopesForServices` reports
+ * those services instead, so the person consenting can be told before the browser opens
+ * (ADR-202).
+ *
+ * Every service currently has an entry, so nothing is granted more than was asked for
+ * today. The reporting path still exists because the next service added may not have
+ * one, and finding that out from a silently broad token is the wrong way to find out.
+ *
+ * Measured against descriptor.json rather than assumed:
+ *
+ * - calendar, docs, gmail, tasks — the scope below covers every GET method exposed.
+ * - meet — `meetings.space.readonly` authorizes every READ manage_meet exposes: all the
+ *   conference-record operations, plus getSpace. The tool also creates, updates and ends
+ *   meeting spaces, and those three need `meetings.space.created` or `.settings`, so a
+ *   read-only meet account holds the readonly scope alone and Google refuses the writes.
+ *   That is the mapping working, not a gap in it. Meet was very nearly left out of this
+ *   map entirely by reading "has no read-only variant" off the scope list instead of off
+ *   what each operation needs.
+ * - drive, sheets — two GET methods and one respectively that no read-only scope covers,
+ *   so read access there allows less than full access but slightly more than reading.
+ * - contacts — only the first of its three scopes has a write form. `contacts.readonly`
+ *   replaces `contacts`; `contacts.other.readonly` and `directory.readonly` are already
+ *   read-only and so are identical in both maps. A read-only contacts account reaches
+ *   every read manage_contacts has and is refused `create` by Google, which is the
+ *   mapping working.
+ */
+export const SERVICE_SCOPE_MAP_READONLY: Record<string, string[]> = {
+  gmail:    ['https://www.googleapis.com/auth/gmail.readonly'],
+  drive:    ['https://www.googleapis.com/auth/drive.readonly'],
+  calendar: ['https://www.googleapis.com/auth/calendar.readonly'],
+  sheets:   ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  docs:     ['https://www.googleapis.com/auth/documents.readonly'],
+  tasks:    ['https://www.googleapis.com/auth/tasks.readonly'],
+  slides:   ['https://www.googleapis.com/auth/presentations.readonly'],
+  meet:     ['https://www.googleapis.com/auth/meetings.space.readonly'],
+  contacts: [
+    'https://www.googleapis.com/auth/contacts.readonly',
+    'https://www.googleapis.com/auth/contacts.other.readonly',
+    'https://www.googleapis.com/auth/directory.readonly',
+  ],
+};
+
+/** How much authority an account's token carries. */
+export type AccessLevel = 'read' | 'readwrite';
 
 const BASE_SCOPES = [
   'openid',
@@ -41,23 +99,77 @@ export interface OAuthResult {
   scopes: string[];
 }
 
+/** The scopes to request, plus any service that did not get the access level asked for. */
+export interface ResolvedScopes {
+  scopes: string[];
+  /**
+   * Services asked for as read-only that will still be able to write, because Google
+   * offers no read-only scope for them. Always empty when asking for read/write.
+   *
+   * The caller has to tell the user about these. It is the difference between "you asked
+   * for read access and got read access" and "you asked for read access and part of this
+   * can still change your data".
+   */
+  stillAllowWrites: string[];
+}
+
+/**
+ * The scopes that grant WRITE access to a service: its read/write set minus anything
+ * that also appears in its read-only set.
+ *
+ * The subtraction is the whole point. Two services list read-only scopes inside their
+ * read/write set, because the service genuinely needs them either way — `contacts`
+ * carries `contacts.other.readonly` and `directory.readonly`, and `meet` carries
+ * `meetings.space.readonly`. Treating the read/write set as "the write scopes" would
+ * therefore find `directory.readonly` on a read-only contacts account, call that an
+ * intersection, and permit a write it should have refused.
+ *
+ * Returns an empty array for a service with no read/write scopes declared at all.
+ */
+export function writeScopesFor(service: string): string[] {
+  const readonly = new Set(SERVICE_SCOPE_MAP_READONLY[service] ?? []);
+  return (SERVICE_SCOPE_MAP[service] ?? []).filter((scope) => !readonly.has(scope));
+}
+
+/** Every scope that grants a service at any access level, read-only and read/write alike. */
+export function anyScopesFor(service: string): string[] {
+  return [...new Set([
+    ...(SERVICE_SCOPE_MAP[service] ?? []),
+    ...(SERVICE_SCOPE_MAP_READONLY[service] ?? []),
+  ])];
+}
+
 /**
  * Convert comma-separated service names to deduplicated scope URLs.
  * Always includes base scopes (openid, userinfo.email).
+ *
+ * `access` defaults to 'readwrite', so every existing caller and every account
+ * authorized before ADR-202 resolves exactly as it did.
  */
-export function scopesForServices(services: string): string[] {
+export function scopesForServices(
+  services: string,
+  access: AccessLevel = 'readwrite',
+): ResolvedScopes {
   const names = services.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const scopes = new Set<string>(BASE_SCOPES);
+  const stillAllowWrites: string[] = [];
 
   for (const name of names) {
-    const mapped = SERVICE_SCOPE_MAP[name];
-    if (!mapped) {
+    const readwrite = SERVICE_SCOPE_MAP[name];
+    if (!readwrite) {
       throw new Error(`Unknown service: '${name}'. Known: ${Object.keys(SERVICE_SCOPE_MAP).join(', ')}`);
     }
-    for (const scope of mapped) scopes.add(scope);
+
+    // Read access uses the read-only scope where Google offers one. Where it does not,
+    // the service keeps its read/write scope AND is reported — see
+    // SERVICE_SCOPE_MAP_READONLY.
+    const readonly = access === 'read' ? SERVICE_SCOPE_MAP_READONLY[name] : undefined;
+    if (access === 'read' && !readonly) stillAllowWrites.push(name);
+
+    for (const scope of readonly ?? readwrite) scopes.add(scope);
   }
 
-  return [...scopes];
+  return { scopes: [...scopes], stillAllowWrites };
 }
 
 /**
@@ -194,7 +306,7 @@ function listenForCallback(
       redirectUri = `http://127.0.0.1:${addr.port}/callback`;
 
       const authUrl = buildAuthUrl(clientId, redirectUri, scopes, state);
-      process.stderr.write(`[gws-mcp] OAuth: opening browser for consent\n`);
+      process.stderr.write(`[google-workspace-mcp] OAuth: opening browser for consent\n`);
       openBrowser(authUrl);
     });
 
@@ -224,10 +336,19 @@ function buildAuthUrl(
 }
 
 export function openBrowser(url: string): void {
-  const cmd = platform() === 'darwin' ? 'open'
-            : platform() === 'win32' ? 'start'
-            : 'xdg-open';
-  execFile(cmd, [url], (err) => {
-    if (err) process.stderr.write(`[gws-mcp] Failed to open browser: ${err.message}\n`);
-  });
+  const onError = (err: Error | null) => {
+    if (!err) return;
+    process.stderr.write(`[google-workspace-mcp] Failed to open browser: ${err.message}\n`);
+    process.stderr.write(`[google-workspace-mcp] Open this URL manually:\n${url}\n`);
+  };
+
+  if (platform() === 'win32') {
+    // 'start' is a cmd.exe built-in, not a standalone executable —
+    // must invoke via cmd /c. The empty "" is the window title argument
+    // that start requires before a quoted URL.
+    exec(`cmd /c start "" "${url}"`, onError);
+  } else {
+    const cmd = platform() === 'darwin' ? 'open' : 'xdg-open';
+    execFile(cmd, [url], onError);
+  }
 }

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "google-workspace-mcp",
   "display_name": "Google Workspace",
-  "version": "2.0.0-alpha.4",
+  "version": "4.6.0",
   "description": "Give AI agents access to Gmail, Calendar, Drive, and more — with multi-account support and manifest-driven API coverage",
   "author": {
     "name": "aaronsb",
@@ -14,7 +14,7 @@
   },
   "homepage": "https://github.com/aaronsb/google-workspace-mcp#readme",
   "support": "https://github.com/aaronsb/google-workspace-mcp/issues",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "google-workspace",
     "gmail",
@@ -35,7 +35,6 @@
       "env": {
         "GOOGLE_CLIENT_ID": "${user_config.google_client_id}",
         "GOOGLE_CLIENT_SECRET": "${user_config.google_client_secret}",
-        "GWS_BINARY_PATH": "${__dirname}/bin",
         "WORKSPACE_DIR": "${user_config.workspace_dir}"
       }
     }
@@ -70,8 +69,28 @@
       "description": "Manage task lists and tasks"
     },
     {
+      "name": "manage_meet",
+      "description": "Browse past Google Meet conferences, participants, transcripts, recordings, and Gemini smart notes"
+    },
+    {
+      "name": "manage_contacts",
+      "description": "Search, read, create, update and delete Google Contacts: your saved contacts, the addresses you have corresponded with but never saved, and your organization's directory."
+    },
+    {
+      "name": "manage_scratchpad",
+      "description": "Compose, edit, and deliver multi-line content: edit by line or JSON path, attach files, then send to email, Docs, Sheets, Tasks, or Calendar"
+    },
+    {
+      "name": "manage_workspace",
+      "description": "Manage files in the workspace sandbox — the exchange point for attachments, downloads, and exports"
+    },
+    {
+      "name": "bulk_operations",
+      "description": "Execute multiple operations in sequence, chaining results between steps"
+    },
+    {
       "name": "queue_operations",
-      "description": "Chain multiple operations sequentially with result references between steps"
+      "description": "RENAMED to bulk_operations — this name still works and will be removed in a future release"
     }
   ],
   "user_config": {
@@ -101,6 +120,9 @@
       "darwin",
       "win32",
       "linux"
-    ]
+    ],
+    "runtimes": {
+      "node": ">=22.12.0"
+    }
   }
 }

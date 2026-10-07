@@ -1,0 +1,237 @@
+tool_name: manage_meet
+description: "Browse past Google Meet conferences, participants, transcripts, recordings, and AI-generated smart notes. Requires Workspace Business Standard+ for transcripts/recordings."
+requires_email: true
+google_service: meet
+operations:
+
+  # --- Conference records ---
+
+  listConferences:
+    type: list
+    description: "list recent meeting conferences (default: descending by start time)"
+    resource: conferenceRecords.list
+    params:
+      filter:
+        type: string
+        description: "EBNF filter. On `listConferences`, e.g. 'space.meeting_code = \"abc-mnop-xyz\"' or 'start_time>=\"2026-01-01T00:00:00Z\"'. On `listParticipants`, e.g. 'latest_end_time IS NULL' for active participants."
+      maxResults:
+        type: number
+        description: "Max results per page, as default/ceiling. Differs by operation: `listConferences` 25/100, `listParticipants` 100/250, `listTranscriptEntries` 100/100. (Google's own default for transcript entries is 10; this tool raises it.)"
+        default: 25
+        max: 100
+        maps_to: pageSize
+
+  getConference:
+    type: detail
+    description: "get details of a specific conference"
+    resource: conferenceRecords.get
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+        maps_to: name
+
+  # --- Participants ---
+
+  listParticipants:
+    type: list
+    description: "list who attended a conference"
+    resource: conferenceRecords.participants.list
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+        maps_to: parent
+      filter:
+        type: string
+        description: "EBNF filter. On `listConferences`, e.g. 'space.meeting_code = \"abc-mnop-xyz\"' or 'start_time>=\"2026-01-01T00:00:00Z\"'. On `listParticipants`, e.g. 'latest_end_time IS NULL' for active participants."
+      maxResults:
+        type: number
+        description: "Max results per page, as default/ceiling. Differs by operation: `listConferences` 25/100, `listParticipants` 100/250, `listTranscriptEntries` 100/100. (Google's own default for transcript entries is 10; this tool raises it.)"
+        default: 100
+        max: 250
+        maps_to: pageSize
+
+  # --- Transcripts ---
+
+  listTranscripts:
+    type: list
+    description: "list transcripts for a conference (requires Workspace Business Standard+)"
+    resource: conferenceRecords.transcripts.list
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+        maps_to: parent
+
+  getTranscript:
+    type: detail
+    description: "get transcript metadata including Google Docs destination"
+    resource: conferenceRecords.transcripts.get
+    params:
+      transcriptName:
+        type: string
+        description: "Transcript resource name (from `listTranscripts`, e.g. conferenceRecords/.../transcripts/...)"
+        required: true
+        maps_to: name
+
+  listTranscriptEntries:
+    type: list
+    description: "get structured transcript text — who said what, with timestamps"
+    resource: conferenceRecords.transcripts.entries.list
+    params:
+      transcriptName:
+        type: string
+        description: "Transcript resource name (from `listTranscripts`, e.g. conferenceRecords/.../transcripts/...)"
+        required: true
+        maps_to: parent
+      maxResults:
+        type: number
+        description: "Max results per page, as default/ceiling. Differs by operation: `listConferences` 25/100, `listParticipants` 100/250, `listTranscriptEntries` 100/100. (Google's own default for transcript entries is 10; this tool raises it.)"
+        default: 100
+        max: 100
+        maps_to: pageSize
+
+  # --- Recordings ---
+
+  listRecordings:
+    type: list
+    description: "list recordings for a conference (saved as MP4 in Drive)"
+    resource: conferenceRecords.recordings.list
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+        maps_to: parent
+
+  getRecording:
+    type: detail
+    description: "get recording metadata including Drive file ID and playback link"
+    resource: conferenceRecords.recordings.get
+    params:
+      recordingName:
+        type: string
+        description: "Recording resource name (from listRecordings)"
+        required: true
+        maps_to: name
+
+  # --- Composite operations ---
+
+  getFullTranscript:
+    type: detail
+    description: "get the full who-said-what transcript for a conference (chains transcripts + entries + participant names automatically). Use pageToken to continue reading."
+    resource: conferenceRecords.transcripts.list
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+      pageToken:
+        type: string
+        description: "Page token from a previous getFullTranscript call to continue reading"
+
+  # --- Smart Notes (Gemini) ---
+
+  listSmartNotes:
+    type: list
+    description: "list Gemini-generated smart notes for a conference"
+    resource: conferenceRecords.smartNotes.list
+    params:
+      conferenceId:
+        type: string
+        description: "Conference record ID (from `listConferences`)"
+        required: true
+        maps_to: parent
+
+  getSmartNote:
+    type: detail
+    description: "get smart note metadata including Google Docs destination"
+    resource: conferenceRecords.smartNotes.get
+    params:
+      smartNoteName:
+        type: string
+        description: "Smart note resource name (from listSmartNotes)"
+        required: true
+        maps_to: name
+
+  # --- Meeting spaces ---
+  #
+  # A space is a standalone meeting link, not attached to a calendar event. For a link on
+  # an event, use `manage_calendar` with `meet: true` — that goes through Calendar and
+  # keeps the two together.
+  #
+  # `createSpace` is the first manage_meet operation that WRITES. Everything above reads
+  # conference records, which `meetings.space.readonly` covers on its own; creating a
+  # space needs `meetings.space.created`, which a read-only account does not hold
+  # (ADR-202). Both handlers are custom: spaces.create declares no parameters at all, so
+  # everything travels in the body, and the response nests the joinable URL.
+
+  createSpace:
+    type: action
+    description: "create a standalone Google Meet link (not attached to a calendar event)"
+    resource: spaces.create
+    params:
+      accessType:
+        type: string
+        enum: ["OPEN", "TRUSTED", "RESTRICTED"]
+        description: "Who can join without knocking. OPEN: anyone with the link. TRUSTED (default): people in your organization, plus invited guests. RESTRICTED: invited guests only."
+      moderation:
+        type: boolean
+        description: "Turn on host controls — the host admits guests and manages who can present or chat."
+
+  activeConferences:
+    type: list
+    description: "list conferences happening RIGHT NOW across your meetings"
+    resource: conferenceRecords.list
+    params:
+      maxResults:
+        type: number
+        description: "Max results per page, as default/ceiling. Differs by operation: `listConferences` 25/100, `listParticipants` 100/250, `listTranscriptEntries` 100/100. (Google's own default for transcript entries is 10; this tool raises it.)"
+        default: 25
+        max: 100
+
+  getSpace:
+    type: detail
+    description: "look up a meeting space by its meeting code or resource name"
+    resource: spaces.get
+    params:
+      space:
+        type: string
+        description: "Meeting code (the abc-mnop-xyz part of a Meet link) or a full spaces/... resource name"
+        required: true
+        maps_to: name
+
+  updateSpace:
+    type: action
+    description: "change who can join a meeting space, or turn host controls on or off"
+    resource: spaces.patch
+    params:
+      space:
+        type: string
+        description: "Meeting code (the abc-mnop-xyz part of a Meet link) or a full spaces/... resource name"
+        required: true
+        maps_to: name
+      accessType:
+        type: string
+        enum: ["OPEN", "TRUSTED", "RESTRICTED"]
+        description: "Who can join without knocking. OPEN: anyone with the link. TRUSTED (default): people in your organization, plus invited guests. RESTRICTED: invited guests only."
+      moderation:
+        type: boolean
+        description: "Turn on host controls — the host admits guests and manages who can present or chat."
+
+  # Ends the meeting for EVERYONE currently in it. There is no undo and no warning to
+  # participants; the call returns an empty body whether or not anyone was in the room.
+  endActiveConference:
+    type: action
+    description: "end the call happening in a space right now, disconnecting everyone in it"
+    resource: spaces.endActiveConference
+    params:
+      space:
+        type: string
+        description: "Meeting code (the abc-mnop-xyz part of a Meet link) or a full spaces/... resource name"
+        required: true
+        maps_to: name

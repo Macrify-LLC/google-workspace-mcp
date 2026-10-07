@@ -2,7 +2,7 @@
  * Tool registry — combines factory-generated schemas with hand-coded tools.
  *
  * Factory tools come from the manifest (ADR-300). Hand-coded tools are
- * manage_accounts (not a gws wrapper) and queue_operations (meta-tool).
+ * manage_accounts (account lifecycle) and queue_operations (meta-tool).
  */
 
 import { generatedTools } from '../factory/registry.js';
@@ -24,12 +24,21 @@ const handCodedSchemas: ToolSchema[] = [
         operation: {
           type: 'string',
           enum: ['list', 'authenticate', 'remove', 'status', 'refresh', 'scopes', 'capabilities'],
-          description: 'list: show all accounts | authenticate: add new account (opens browser) | remove: delete account and credentials | status: check token validity and scopes | refresh: re-export credentials from gws | scopes: re-auth with different services | capabilities: show available services, safety policies, and workspace status',
+          description: 'list: show all accounts | authenticate: add new account (opens browser) | remove: delete account and credentials | status: check token validity and scopes | refresh: renew credentials | scopes: re-auth with different services | capabilities: show available services, safety policies, and workspace status',
         },
         email: { type: 'string', description: 'Required for remove, status, refresh, scopes' },
         category: { type: 'string', enum: ['personal', 'work', 'other'], description: 'For authenticate (default: personal)' },
         description: { type: 'string', description: 'For authenticate — optional label' },
         services: { type: 'string', description: 'For scopes — comma-separated service names (e.g. gmail,drive,calendar,sheets)' },
+        access: {
+          type: 'string',
+          enum: ['read', 'readwrite'],
+          description: "How much this account may do. 'readwrite' (default) is full access. 'read' asks Google for read-only permissions instead, so the account can look things up but cannot send, edit or delete. Some services have no read-only option — you will be told which before the browser opens, and nothing is authorized until you confirm.",
+        },
+        confirmWriteAccess: {
+          type: 'boolean',
+          description: "Set true to go ahead when 'read' was asked for but some services can only be granted full access. Only needed after a first call has told you which ones.",
+        },
       },
       required: ['operation'],
       additionalProperties: false,
@@ -37,28 +46,100 @@ const handCodedSchemas: ToolSchema[] = [
   },
   {
     name: 'manage_workspace',
-    description: 'Read, write, list, or delete files in the workspace directory. The workspace is the exchange point for file operations (attachments, downloads, exports).',
+    description: 'Manage files and directories in the workspace sandbox. Supports nested paths (e.g. "reports/q1/summary.csv"). The workspace is the exchange point for file operations (attachments, downloads, exports).',
     inputSchema: {
       type: 'object',
       properties: {
         operation: {
           type: 'string',
-          enum: ['list', 'read', 'write', 'delete'],
-          description: 'list: show files in workspace | read: get file content | write: save content to file | delete: remove a file',
+          enum: ['list', 'read', 'write', 'delete', 'move', 'mkdir', 'compress', 'decompress'],
+          description: 'list: show files (recursive) | read: get file content | write: save content to file | delete: remove file or directory | move: move or rename a file/directory | mkdir: create a directory | compress: gzip a file | decompress: gunzip a file',
         },
-        filename: { type: 'string', description: 'File name (for read, write, delete)' },
+        filename: { type: 'string', description: 'File path, may include directories (for read, write, delete, compress, decompress). E.g. "reports/q1/summary.csv"' },
         content: { type: 'string', description: 'File content to write (for write)' },
+        path: { type: 'string', description: 'Directory path (for list: scope to subdirectory, for mkdir: directory to create)' },
+        source: { type: 'string', description: 'Source path (for move)' },
+        destination: { type: 'string', description: 'Destination path (for move, compress, decompress). Defaults to filename.gz for compress, strips .gz for decompress.' },
       },
       required: ['operation'],
       additionalProperties: false,
     },
   },
   {
-    name: 'queue_operations',
-    description: 'Execute multiple operations in sequence. Operations run in order with result references ($0.field) to chain outputs. Use for multi-step workflows.',
+    name: 'manage_scratchpad',
+    description: 'Compose, edit, and deliver text content. Use for any multi-line content: emails, documents, descriptions. Compose in the scratchpad, edit by line or JSON path, attach files, then send to any target. For short one-liners, use the service tool directly instead.',
     inputSchema: {
       type: 'object',
       properties: {
+        operation: {
+          type: 'string',
+          enum: [
+            'create', 'view', 'discard', 'list',
+            'insert_lines', 'append_lines', 'replace_lines', 'remove_lines', 'copy_lines',
+            'json_get', 'json_set', 'json_delete', 'json_insert',
+            'attach', 'detach',
+            'import', 'send',
+          ],
+          description: 'create: new buffer | view: show content | discard: free buffer | list: show all | insert_lines/append_lines/replace_lines/remove_lines: line editing | copy_lines: copy from another scratchpad | json_get/json_set/json_delete/json_insert: path-addressed JSON editing | attach/detach: file references | import: load from Google Workspace resource | send: deliver to target',
+        },
+        scratchpadId: { type: 'string', description: 'Scratchpad ID (sp-XXXX). Required for all operations except create and list.' },
+        // create
+        label: { type: 'string', description: 'For create: optional human-readable label' },
+        format: { type: 'string', enum: ['text', 'markdown', 'json', 'csv'], description: 'For create: content format (default: text). Controls validation and addressing mode.' },
+        // line ops
+        content: { type: 'string', description: 'Text content. For create (pre-fill), insert_lines, append_lines, replace_lines.' },
+        afterLine: { type: 'number', description: 'Insert after this line number (0 = prepend). For insert_lines, copy_lines, attach.' },
+        startLine: { type: 'number', description: 'Start of line range (1-based). For replace_lines, remove_lines, copy_lines, view.' },
+        endLine: { type: 'number', description: 'End of line range (inclusive). For replace_lines, remove_lines, copy_lines, view.' },
+        // copy_lines
+        fromScratchpadId: { type: 'string', description: 'For copy_lines: source scratchpad ID' },
+        // json path ops
+        path: { type: 'string', description: 'For json_* ops: JSON path (e.g., $.config.name, $.items[0].value)' },
+        value: { description: 'For json_set, json_insert: value to set or insert (any JSON type)' },
+        // attach
+        source: { type: 'string', description: 'For attach: file source (workspace or drive). For import: resource type (doc, email, sheet, drive_file).' },
+        filename: { type: 'string', description: 'For attach (workspace source): filename in workspace' },
+        fileId: { type: 'string', description: 'For attach (drive source): Drive file ID' },
+        refId: { type: 'string', description: 'For detach: attachment reference ID (att-1, att-2, etc.)' },
+        // import
+        sourceParams: { type: 'object', description: 'For import: source-specific parameters (e.g., { documentId, mode } for doc, { messageId } for email)' },
+        // send
+        target: { type: 'string', enum: ['email', 'email_draft', 'doc_create', 'doc_write', 'workspace', 'sheet_write', 'calendar_event', 'task_create'], description: 'For send: delivery target' },
+        targetParams: { type: 'object', description: 'For send: target-specific parameters (e.g., { email, to, subject } for email, { filename } for workspace)' },
+        keep: { type: 'boolean', description: 'For send: keep scratchpad after successful send (default: true)' },
+      },
+      required: ['operation'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'bulk_operations',
+    description: "Do many things in one call, two ways. mode:'queue' (default) runs different operations in sequence, chaining results with $N.field — works for every tool. mode:'batch' does ONE operation across many resources in a single Google request — far fewer round trips, but only where Google publishes a batch method.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['queue', 'batch'],
+          description: "queue (default): N operations, N API calls, in order, with $N.field references between them. batch: ONE operation across many resources in a single API call — no $N references, because there is no 'between'.",
+        },
+        tool: {
+          type: 'string',
+          description: "batch only — the tool to call, e.g. 'manage_contacts'.",
+        },
+        operation: {
+          type: 'string',
+          description: "batch only — the operation to apply to every item, e.g. 'delete'. Ask for one that cannot batch and the error names the ones that can.",
+        },
+        email: {
+          type: 'string',
+          description: 'batch only — the account to act as.',
+        },
+        items: {
+          type: 'array',
+          items: { type: ['string', 'object'] },
+          description: "batch only — one entry per resource. A bare id string is enough when that is all that differs, e.g. ['people/c1', 'people/c2']; use objects when items carry more, e.g. [{name: 'Ada Lovelace', contactEmail: 'ada@example.com'}]. Anything shared by the WHOLE batch — labels to add, a field mask — goes at the top level of this call, not in here.",
+        },
         operations: {
           type: 'array',
           items: {
@@ -66,7 +147,11 @@ const handCodedSchemas: ToolSchema[] = [
             properties: {
               tool: {
                 type: 'string',
-                enum: ['manage_email', 'manage_calendar', 'manage_drive', 'manage_accounts'],
+                // Filled in below from the tools this server actually advertises. Written
+                // out by hand, this list silently omitted every tool added after it: a new
+                // tool worked on its own and was unreachable from a queue, with nothing to
+                // say why. manage_contacts was the one that surfaced it.
+                enum: [] as string[],
                 description: 'Tool to call',
               },
               args: {
@@ -90,11 +175,36 @@ const handCodedSchemas: ToolSchema[] = [
           description: 'summary: one-line status per operation (default) | full: include complete output from each operation',
         },
       },
-      required: ['operations'],
+      // `operations` is required for queue and absent for batch, so neither can be
+      // required here. The handler validates per mode and names what is missing.
       additionalProperties: false,
     },
   },
 ];
+
+/**
+ * The former name, still advertised and still working. ADR-308.
+ *
+ * Removing it outright would answer an established call with "Unknown tool" and no
+ * indication of what replaced it — MCP client configurations and agent habits both name
+ * it. The schema is shared by reference with `bulk_operations`, so the two cannot drift
+ * and the derived tool enum below fills both at once.
+ *
+ * Remove after one minor release.
+ */
+const DEPRECATED_ALIASES: Record<string, string> = {
+  queue_operations: 'bulk_operations',
+};
+
+for (const [oldName, newName] of Object.entries(DEPRECATED_ALIASES)) {
+  const target = handCodedSchemas.find((t) => t.name === newName);
+  if (!target) continue;
+  handCodedSchemas.push({
+    name: oldName,
+    description: `RENAMED to \`${newName}\`, which does the same thing. This name still works and will be removed in a future release. ${target.description}`,
+    inputSchema: target.inputSchema,
+  });
+}
 
 // Factory-generated schemas from the shared registry
 const factorySchemas: ToolSchema[] = generatedTools.map(t => t.schema);
@@ -103,6 +213,26 @@ export const toolSchemas: ToolSchema[] = [
   ...handCodedSchemas,
   ...factorySchemas,
 ];
+
+/**
+ * Point queue_operations at every tool this server advertises — itself included.
+ *
+ * Done here rather than in the literal above because the factory schemas are not built
+ * until `generatedTools` has run, and queue_operations is declared alongside the
+ * hand-coded tools that come first.
+ *
+ * There is no carve-out. A queue is a tool call, so the tools a queue may name are the
+ * tools; nesting is bounded by depth in handleQueue, which answers with a sentence saying
+ * what the limit is, rather than by omission here, which would answer a plainly
+ * advertised tool with "Unknown tool".
+ */
+const bulkTool = handCodedSchemas.find(t => t.name === 'bulk_operations');
+if (bulkTool) {
+  const operations = (bulkTool.inputSchema.properties as Record<string, { items: { properties: { tool: { enum: string[] } } } }>).operations;
+  // The alias shares this inputSchema object by reference, so it is filled by the same
+  // assignment and cannot disagree about which tools exist.
+  operations.items.properties.tool.enum = toolSchemas.map(t => t.name);
+}
 
 export function getToolSchema(name: string): ToolSchema | undefined {
   return toolSchemas.find(t => t.name === name);

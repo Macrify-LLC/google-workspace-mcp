@@ -1,5 +1,12 @@
+import { describe, expect, it, vi, type Mock } from 'vitest';
+// Mock handler.js to avoid loading registry.ts (which uses import.meta.url)
+vi.mock('../../server/handler.js', () => ({
+  advanceEpoch: vi.fn(() => 1),
+  getEpoch: vi.fn(() => 1),
+}));
+
 import { handleQueue } from '../../server/queue.js';
-import type { HandlerResponse } from '../../server/handler.js';
+import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
 type ToolHandler = (p: Record<string, unknown>) => Promise<HandlerResponse>;
 
@@ -15,6 +22,86 @@ const handlers: Record<string, ToolHandler> = {
   }),
   tool_fail: async () => { throw new Error('intentional failure'); },
 };
+
+/**
+ * A queue is a tool call, so a queue can hold one. The tool list has no carve-out, and
+ * the bound is depth — which arrives as a sentence saying what the limit is, rather than
+ * as "Unknown tool" for something the server plainly advertises.
+ */
+describe('nested queues', () => {
+  /** Handlers that can reach a queue, the same shape handler.ts builds. */
+  function nestable(depth: number): Record<string, ToolHandler> {
+    return {
+      ...handlers,
+      queue_operations: (p) => handleQueue(p, nestable(depth + 1), depth + 1),
+    };
+  }
+
+  it('runs a queue inside a queue', async () => {
+    const result = await handleQueue({
+      operations: [
+        { tool: 'tool_a', args: { input: 'outer' } },
+        { tool: 'queue_operations', args: { operations: [{ tool: 'tool_a', args: { input: 'inner' } }] } },
+      ],
+    }, nestable(1), 1);
+
+    expect(result.text).toContain('2/2 succeeded');
+    expect(result.refs?.succeeded).toBe(2);
+  });
+
+  it('lets an inner failure stay inside when the inner queue continues', async () => {
+    // The reason to nest at all: a sub-queue absorbs its own failures instead of bailing
+    // the parent.
+    const result = await handleQueue({
+      operations: [
+        {
+          tool: 'queue_operations',
+          args: {
+            operations: [
+              { tool: 'tool_fail', args: {}, onError: 'continue' },
+              { tool: 'tool_a', args: { input: 'ran anyway' } },
+            ],
+          },
+        },
+        { tool: 'tool_a', args: { input: 'parent continued' } },
+      ],
+    }, nestable(1), 1);
+
+    expect(result.refs?.succeeded).toBe(2);
+    expect(result.refs?.failed).toBe(0);
+  });
+
+  it('refuses to nest past the bound, and says what the bound is', async () => {
+    // Each level multiplies: 10 operations per queue makes depth 3 a 1,000-call ceiling.
+    await expect(handleQueue({ operations: [{ tool: 'tool_a', args: {} }] }, nestable(4), 4))
+      .rejects.toThrow('nested more than 3 deep');
+  });
+
+  it('reports a too-deep nesting as a failed operation rather than losing it', async () => {
+    // The throw happens inside the nested call, so the parent records it as an error on
+    // that operation. `detail: 'full'` is where the reason is legible.
+    const deep = (levels: number): Record<string, unknown> =>
+      levels === 0
+        ? { tool: 'tool_a', args: { input: 'bottom' } }
+        : { tool: 'queue_operations', args: { operations: [deep(levels - 1)] } };
+
+    const result = await handleQueue({ operations: [deep(3)], detail: 'full' }, nestable(1), 1);
+
+    expect(result.text).toContain('nested more than 3 deep');
+  });
+
+  it('allows nesting right up to the bound', async () => {
+    const result = await handleQueue({
+      operations: [{
+        tool: 'queue_operations',
+        args: { operations: [{ tool: 'queue_operations', args: { operations: [{ tool: 'tool_a', args: {} }] } }] },
+      }],
+    }, nestable(1), 1);
+
+    expect(result.refs?.succeeded).toBe(1);
+    expect(result.text).not.toContain('nested more than');
+  });
+});
 
 describe('handleQueue', () => {
   it('executes operations sequentially', async () => {
@@ -226,5 +313,42 @@ describe('handleQueue', () => {
       // No blank-line-separated full output block
       expect(result.text).not.toMatch(/\n\nResult A: hello\n/);
     });
+  });
+});
+
+describe('a blocked operation is a failure, not a success', () => {
+  // Policies decline by RETURNING a response, not by throwing, so the queue's catch never
+  // sees them. Before this, a queue of two writes on a read-only account reported
+  // "2/2 succeeded" while writing nothing, and `onError: 'bail'` ran the rest anyway.
+  const blockingHandler = async () => ({
+    text: '**Blocked by safety policy:** not allowed',
+    refs: { blocked: true, policy: 'not allowed' },
+  });
+
+  it('counts as failed rather than succeeded', async () => {
+    const result = await handleQueue(
+      { operations: [{ tool: 'manage_contacts', args: { operation: 'create' } }] },
+      { manage_contacts: blockingHandler },
+    );
+    expect(result.text).toContain('0/1 succeeded');
+  });
+
+  it('bails the rest of the queue under onError: bail', async () => {
+    let secondRan = false;
+    const result = await handleQueue(
+      {
+        operations: [
+          { tool: 'manage_contacts', args: { operation: 'create' } },
+          { tool: 'manage_email', args: { operation: 'send' } },
+        ],
+        onError: 'bail',
+      },
+      {
+        manage_contacts: blockingHandler,
+        manage_email: async () => { secondRan = true; return { text: 'sent', refs: {} }; },
+      },
+    );
+    expect(secondRan).toBe(false);
+    expect(result.text).toContain('0/2 succeeded');
   });
 });

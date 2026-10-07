@@ -94,11 +94,35 @@ docker run -i --rm \
 ## Testing Requirements
 
 - Write unit tests for all new functionality
-- Use Jest for testing
+- Use [Vitest](https://vitest.dev) for testing (ADR-101 — we migrated off Jest).
+  Import test globals explicitly: `import { describe, it, expect, vi } from 'vitest'`
+- Register `vi.mock()` **in the test file itself**, never in a shared helper —
+  vitest hoists `vi.mock` per-file, so a mock registered elsewhere silently
+  depends on import order
 - Mock external dependencies
 - Test both success and error cases
 - Maintain existing test coverage
-- Run the full test suite before submitting PR
+- Run `make test` (mocked, no network) before submitting a PR.
+  `make test-integration` additionally hits live Google APIs and needs a
+  configured account; `make check` is the full gate
+
+### Node version
+
+**Node >=22.12** — one number, for both running and developing the server (ADR-102).
+
+There used to be two floors: a lower one for consumers and a higher one for the test
+toolchain. Conflating them shipped a startup crash to every Node 18 user once, so they
+are now the same number, and that number is checked three ways:
+
+- `engines.node` in `package.json` — what npm tells a consumer at install time
+- the `engines-floor` CI job — actually *runs* the built server on exactly that Node
+- `MIN_NODE` in `src/index.ts` — a startup guard, so an unsupported runtime gets a
+  readable sentence instead of a stack trace from inside `node_modules`
+
+`make check` runs `check-node-floor`, which fails if those three ever disagree. If you
+raise the floor, raise it in all three; the check will tell you if you miss one.
+
+Node 18 and Node 20 are both end-of-life (April 2025 and April 2026).
 
 ## Pull Request Process
 
@@ -127,4 +151,10 @@ Feel free to open an issue for:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the
+[Apache License 2.0](LICENSE).
+
+This project was MIT-licensed through v3.0.0. That history is preserved: the MIT notice
+is retained in `LICENSE-MIT`, and contributors from that period are credited in `NOTICE`.
+Apache 2.0 adds an explicit patent grant and a requirement to state changes — it does not
+restrict what MIT allowed.

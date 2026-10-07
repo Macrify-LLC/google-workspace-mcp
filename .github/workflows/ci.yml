@@ -2,41 +2,149 @@ name: CI
 
 on:
   push:
-    branches: [ main, fix/*, feature/* ]
+    branches: [ main, next, fix/*, feature/* ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, next ]
   workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
       with:
-        node-version: '20'
+        node-version: '24'
         cache: 'npm'
     - run: npm ci
+    # Every test file must be run by some gate. `npm test` uses an allowlist of
+    # vetted mocked directories, so a test added elsewhere would otherwise run
+    # nowhere and report nothing.
+    - run: node scripts/check-test-gates.mjs
+    # The floor we publish, execute, and enforce at startup must be ONE number.
+    - run: node scripts/check-node-floor.mjs
     - run: npm test
+
+  type-check:
+    # Vitest transpiles via esbuild WITHOUT type-checking, and tsconfig.json
+    # excludes tests from the build — so without this job a type error in a test
+    # file passes npm test, npm run build and npm run lint, and merges green.
+    # ts-jest used to cover this on every `npm test`; nothing else does now.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run type-check
 
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
       with:
-        node-version: '20'
+        node-version: '24'
         cache: 'npm'
     - run: npm ci
     - run: npm run build
 
+  engines-floor:
+    # Executes the floor we PUBLISH, rather than advertising it.
+    #
+    # The other jobs run whatever Node is current, and the dev box runs newer still,
+    # so without this job nothing ever runs the *oldest* Node we claim to support. A
+    # dependency that is fine on the Node you test and broken on the Node you ship is
+    # invisible to every check that runs on the Node you test — which is exactly how
+    # `sanitize-html` ^2.17.6 (CommonJS, require()ing the pure-ESM htmlparser2@12 →
+    # ERR_REQUIRE_ESM below the floor) once reached a merge-ready branch green.
+    #
+    # The second setup-node below MUST equal `engines.node` in package.json. That
+    # coupling is the entire value of this job: raise the floor, raise it here, or
+    # the guard silently stops guarding the thing it names.
+    #
+    # Build on current Node (tsc and Vitest need it), then run the BUILT server on the
+    # floor against the PRODUCTION dependency tree only — which is what a consumer
+    # installs, and all a consumer gets.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run build
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22.12.0'   # == engines.node in package.json. Keep in sync.
+    - run: rm -rf node_modules && npm ci --omit=dev
+    - run: node --version
+    - run: node scripts/smoke-start.mjs
+
+  engines-floor-reject:
+    # The mirror of engines-floor, and the guard-for-the-guard.
+    #
+    # engines-floor proves the server STARTS above the floor. Nothing proved it REFUSES
+    # below it — so the startup guard's entire reason for existing had zero coverage.
+    # src/index.ts reaches the server via `await import()` AFTER the version check,
+    # precisely so sanitize-html -> htmlparser2@12 is never evaluated on a runtime that
+    # cannot require() ESM. Turn that one line back into a static import and the crash
+    # returns while check-node-floor, typecheck, lint, all 681 tests and every other job
+    # stay green — because every runtime in CI is above the floor. The only thing
+    # defending it was a code comment saying "do not tidy this into a static import."
+    #
+    # So: run the built entrypoint on a Node BELOW the floor and assert it exits non-zero
+    # with our message and WITHOUT ERR_REQUIRE_ESM. That behavioral test is what actually
+    # protects the dynamic import.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run build
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '20.19.0'   # deliberately BELOW the floor — that is the point
+    - run: rm -rf node_modules && npm ci --omit=dev
+    - run: node --version
+    - run: node scripts/smoke-reject.mjs
+
+  orphan-exit:
+    # Proves an orphaned server EXITS rather than pegging a CPU core forever (#149).
+    #
+    # The unit tests cover `isOrphaned` as a predicate. Nothing there proves a real
+    # process tree actually reclaims itself, which is the only claim the user in #149
+    # cares about — they found two orphans that had each burned 31 minutes of CPU in
+    # 31 minutes of wall time.
+    #
+    # The smoke script runs the HARD case deliberately: stdin that never reports EOF, so
+    # only the watchdog can save the process. An easy orphan reclaims itself via stdin EOF
+    # and would pass with the watchdog deleted — a guard reporting on a signal that was
+    # never the one under test. Verified to fail against the pre-fix entrypoint.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run build
+    - run: node scripts/smoke-orphan.mjs
+
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
       with:
-        node-version: '20'
+        node-version: '24'
         cache: 'npm'
     - run: npm ci
     - run: npm run lint

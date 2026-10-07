@@ -1,0 +1,222 @@
+tool_name: manage_sheets
+description: "Read, write, and manage Google Sheets spreadsheets."
+requires_email: true
+google_service: sheets
+operations:
+
+  get:
+    type: detail
+    description: "get spreadsheet metadata and sheet names"
+    resource: spreadsheets.get
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+
+  create:
+    type: action
+    description: "create a new spreadsheet (optionally with a title)"
+    resource: spreadsheets.create
+    params:
+      title:
+        type: string
+        description: "On `create`, the spreadsheet title (defaults to 'Untitled spreadsheet'); on `renameSpreadsheet`, its new title. On `addSheet`, the name of the new TAB; on `renameSheet`, that tab's new title; on `duplicateSheet`, the name for the copy (defaults to 'Copy of <source>')."
+
+  read:
+    type: detail
+    description: "read cell values from a range; rendered rows are prefixed with their sheet row number (e.g. 'R3: …') since blank rows are otherwise invisible"
+    resource: spreadsheets.values.get
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      range:
+        type: string
+        description: "A1 notation range (e.g. 'Sheet1!A1:D10', or just 'Sheet1' for a whole tab). On `append`, the target tab — defaults to 'Sheet1'; use 'MyTab' or 'MyTab!A:Z' to append to a specific one."
+        required: true
+
+  append:
+    type: action
+    description: "append rows to a spreadsheet (rows land after the last row of existing data in the target range)"
+    resource: spreadsheets.values.append
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      range:
+        type: string
+        description: "A1 notation range (e.g. 'Sheet1!A1:D10', or just 'Sheet1' for a whole tab). On `append`, the target tab — defaults to 'Sheet1'; use 'MyTab' or 'MyTab!A:Z' to append to a specific one."
+      values:
+        type: string
+        description: "Comma-separated values for a single row (e.g. 'Alice,100,true')"
+      jsonValues:
+        type: string
+        description: "JSON 2D array of rows (e.g. '[[\"a\",\"b\"],[\"c\",\"d\"]]'). Use for bulk and multi-row writes."
+      valueInputOption:
+        type: string
+        description: "How input is interpreted: USER_ENTERED (default, parses formulas/types) or RAW"
+        enum: [USER_ENTERED, RAW]
+        default: USER_ENTERED
+
+  getValues:
+    type: detail
+    description: "get values from a specific range (raw API); rendered rows are prefixed with their sheet row number (e.g. 'R3: …')"
+    resource: spreadsheets.values.get
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      range:
+        type: string
+        description: "A1 notation range (e.g. 'Sheet1!A1:D10', or just 'Sheet1' for a whole tab). On `append`, the target tab — defaults to 'Sheet1'; use 'MyTab' or 'MyTab!A:Z' to append to a specific one."
+        required: true
+
+  updateValues:
+    type: action
+    description: "write values to a specific range"
+    resource: spreadsheets.values.update
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      range:
+        type: string
+        description: "A1 notation range (e.g. 'Sheet1!A1:D10', or just 'Sheet1' for a whole tab). On `append`, the target tab — defaults to 'Sheet1'; use 'MyTab' or 'MyTab!A:Z' to append to a specific one."
+        required: true
+      values:
+        type: string
+        description: "Comma-separated values for a single row (e.g. 'Alice,100,true')"
+      jsonValues:
+        type: string
+        description: "JSON 2D array of rows (e.g. '[[\"a\",\"b\"],[\"c\",\"d\"]]'). Use for bulk and multi-row writes."
+      valueInputOption:
+        type: string
+        description: "How input is interpreted: USER_ENTERED (default, parses formulas/types) or RAW"
+        enum: [USER_ENTERED, RAW]
+        default: USER_ENTERED
+
+  clearValues:
+    type: action
+    description: "clear cell values from a range (structure preserved)"
+    resource: spreadsheets.values.clear
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      range:
+        type: string
+        description: "A1 notation range (e.g. 'Sheet1!A1:D10', or just 'Sheet1' for a whole tab). On `append`, the target tab — defaults to 'Sheet1'; use 'MyTab' or 'MyTab!A:Z' to append to a specific one."
+        required: true
+
+  addSheet:
+    type: action
+    description: "add a new tab (sheet) to the spreadsheet"
+    resource: spreadsheets.batchUpdate
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      title:
+        type: string
+        description: "On `create`, the spreadsheet title (defaults to 'Untitled spreadsheet'); on `renameSpreadsheet`, its new title. On `addSheet`, the name of the new TAB; on `renameSheet`, that tab's new title; on `duplicateSheet`, the name for the copy (defaults to 'Copy of <source>')."
+        required: true
+      index:
+        type: number
+        description: "Position among tabs (0-based). Appended at the end if omitted."
+      rowCount:
+        type: number
+        description: "Initial row count (default 1000)"
+      columnCount:
+        type: number
+        description: "Initial column count (default 26)"
+
+  renameSheet:
+    type: action
+    description: "rename a tab (sheet) within a spreadsheet"
+    resource: spreadsheets.batchUpdate
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      sheetId:
+        type: number
+        description: "Sheet ID of the tab, from `manage_sheets get`. On `duplicateSheet` and `copySheetTo`, the SOURCE tab to copy."
+        required: true
+      title:
+        type: string
+        description: "On `create`, the spreadsheet title (defaults to 'Untitled spreadsheet'); on `renameSpreadsheet`, its new title. On `addSheet`, the name of the new TAB; on `renameSheet`, that tab's new title; on `duplicateSheet`, the name for the copy (defaults to 'Copy of <source>')."
+        required: true
+
+  deleteSheet:
+    type: action
+    description: "delete a tab (sheet) from the spreadsheet — irreversible"
+    resource: spreadsheets.batchUpdate
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      sheetId:
+        type: number
+        description: "Sheet ID of the tab, from `manage_sheets get`. On `duplicateSheet` and `copySheetTo`, the SOURCE tab to copy."
+        required: true
+
+  duplicateSheet:
+    type: action
+    description: "duplicate a tab within the same spreadsheet"
+    resource: spreadsheets.batchUpdate
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      sheetId:
+        type: number
+        description: "Sheet ID of the tab, from `manage_sheets get`. On `duplicateSheet` and `copySheetTo`, the SOURCE tab to copy."
+        required: true
+      title:
+        type: string
+        description: "On `create`, the spreadsheet title (defaults to 'Untitled spreadsheet'); on `renameSpreadsheet`, its new title. On `addSheet`, the name of the new TAB; on `renameSheet`, that tab's new title; on `duplicateSheet`, the name for the copy (defaults to 'Copy of <source>')."
+      index:
+        type: number
+        description: "Position among tabs (0-based). Appended at the end if omitted."
+
+  renameSpreadsheet:
+    type: action
+    description: "rename the spreadsheet (the document title, not a tab)"
+    resource: spreadsheets.batchUpdate
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      title:
+        type: string
+        description: "On `create`, the spreadsheet title (defaults to 'Untitled spreadsheet'); on `renameSpreadsheet`, its new title. On `addSheet`, the name of the new TAB; on `renameSheet`, that tab's new title; on `duplicateSheet`, the name for the copy (defaults to 'Copy of <source>')."
+        required: true
+
+  copySheetTo:
+    type: action
+    description: "copy a tab from this spreadsheet into another spreadsheet"
+    resource: spreadsheets.sheets.copyTo
+    params:
+      spreadsheetId:
+        type: string
+        description: "Spreadsheet ID. On `copySheetTo`, the SOURCE spreadsheet."
+        required: true
+      sheetId:
+        type: number
+        description: "Sheet ID of the tab, from `manage_sheets get`. On `duplicateSheet` and `copySheetTo`, the SOURCE tab to copy."
+        required: true
+      destinationSpreadsheetId:
+        type: string
+        description: "Destination spreadsheet ID"
+        required: true
