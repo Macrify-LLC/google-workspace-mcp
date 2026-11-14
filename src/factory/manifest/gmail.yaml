@@ -1,0 +1,623 @@
+tool_name: manage_email
+description: "Search, read, send, forward, or manage emails in a Google Workspace account. Supports Gmail search syntax."
+requires_email: true
+google_service: gmail
+operations:
+
+  # --- Core message operations ---
+
+  search:
+    type: list
+    description: "find emails by query. Says when more results exist than the page shows; continue with pageToken, or pass idsOnly to collect up to 500 ids per page for bulk_operations."
+    resource: users.messages.list
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        maps_to: q
+      maxResults:
+        type: number
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
+        default: 10
+        max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
+      idsOnly:
+        type: boolean
+        description: "On `search`: return only message ids, up to 500 per page, without fetching each message's headers. For counting a large result or collecting ids to pass to bulk_operations batch mode (e.g. modify)."
+        client_only: true
+    defaults:
+      userId: me
+    hydration:
+      resource: users.messages.get
+      format: metadata
+      headers: [From, Subject, Date]
+
+  read:
+    type: detail
+    description: "get full email by ID. Pass bodyFormat: 'html' when the plain-text part is a stub (marketing email, invitations, booking confirmations) and the dates/codes you need only exist in the HTML — returned HTML is sanitized and wrapped in a Spotlighting block (ADR-305)."
+    resource: users.messages.get
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+        maps_to: id
+      bodyFormat:
+        type: string
+        description: "How to render the message body. 'plain' (default) returns text/plain or a crude HTML-strip fallback. 'html' returns the text/html part sanitized — useful when the plain-text part is empty/stub."
+        enum: [plain, html]
+        default: plain
+        client_only: true
+    defaults:
+      userId: me
+
+  archive:
+    type: action
+    description: "save an email's headers and body to a markdown file in the workspace — a LOCAL archive, not Gmail's 'remove from inbox' (attachments are listed, not downloaded)"
+    resource: users.messages.get
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+        maps_to: id
+      outputPath:
+        type: string
+        description: "Local path to save the markdown file (workspace-relative; defaults to a slug from the message date and subject)"
+    defaults:
+      userId: me
+
+  send:
+    type: action
+    description: "compose and send a new email (creates draft when attachments present, 35MB attachment limit via upload endpoint)"
+    params:
+      to:
+        type: string
+        description: "Recipient email(s), comma-separated"
+        required: true
+      subject:
+        type: string
+        description: "Email subject line"
+        required: true
+      body:
+        type: string
+        description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+        required: true
+      from:
+        type: string
+        description: "Sender email or RFC 2822 mailbox for a verified Gmail Send As alias"
+      cc:
+        type: string
+        description: "CC email(s), comma-separated. On `replyAll` these are ADDITIONAL — they do not replace the recipients already on the thread."
+      bcc:
+        type: string
+        description: "BCC email(s), comma-separated"
+      attachments:
+        type: string
+        description: "Workspace filenames to attach, comma-separated (files must exist in workspace via manage_workspace). Creates draft when present."
+      html:
+        type: boolean
+        description: "Treat body as HTML content (default: plain text)"
+      draft:
+        type: boolean
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
+
+  reply:
+    type: action
+    description: "reply to a message (thread-aware, creates draft when attachments present)"
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+      body:
+        type: string
+        description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+        required: true
+      attachments:
+        type: string
+        description: "Workspace filenames to attach, comma-separated (files must exist in workspace via manage_workspace). Creates draft when present."
+      html:
+        type: boolean
+        description: "Treat body as HTML content (default: plain text)"
+      draft:
+        type: boolean
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
+
+  replyAll:
+    type: action
+    description: "reply-all to a message (thread-aware, includes all recipients, creates draft when attachments present)"
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+      body:
+        type: string
+        description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+        required: true
+      cc:
+        type: string
+        description: "CC email(s), comma-separated. On `replyAll` these are ADDITIONAL — they do not replace the recipients already on the thread."
+      attachments:
+        type: string
+        description: "Workspace filenames to attach, comma-separated (files must exist in workspace via manage_workspace). Creates draft when present."
+      html:
+        type: boolean
+        description: "Treat body as HTML content (default: plain text)"
+      draft:
+        type: boolean
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
+
+  forward:
+    type: action
+    description: "forward a message to new recipients (includes original attachments by default)"
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+      to:
+        type: string
+        description: "Recipient email(s), comma-separated"
+        required: true
+      body:
+        type: string
+        description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+      draft:
+        type: boolean
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
+
+  # --- Inbox management ---
+
+  # triage is just a filtered list: messages.list with an unread query. The
+  # hydration walk (messages.get per id) is already done by gmailPatch.afterExecute,
+  # which also carries threadId and snippet.
+  triage:
+    type: list
+    description: "unread inbox summary (sender, subject, date)"
+    resource: users.messages.list
+    params:
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
+    defaults:
+      userId: me
+      q: "is:unread in:inbox"
+      maxResults: 20
+
+  trash:
+    type: action
+    description: "move a message to trash"
+    resource: users.messages.trash
+    # Gmail publishes no bulk trash. Trashing many messages is batchModify adding the
+    # TRASH label — reversible, and on the gmail.modify scope we already hold. The caller
+    # asks to trash; the label is ours to know. (ADR-308)
+    batch:
+      resource: users.messages.batchModify
+      defaults:
+        # Required PATH parameter. The single operations each carry their own `userId`,
+        # and batch reads only this block — so omitting it here failed live with
+        # "missing required path param 'userId'".
+        userId: me
+        addLabelIds: ['TRASH']
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+        maps_to: id
+    defaults:
+      userId: me
+
+  untrash:
+    type: action
+    description: "restore a message from trash"
+    resource: users.messages.untrash
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+        maps_to: id
+    defaults:
+      userId: me
+
+  # --- Drafts ---
+
+  # Drafts are their own Gmail resource: users.drafts.list returns DRAFT ids
+  # (they start with "r", e.g. r24657...), and deleteDraft addresses the draft, not
+  # the message. A message id from `search in:drafts` cannot be handed to
+  # drafts.delete, which is why listDrafts exists — it pairs each draft id with
+  # its recipient/subject/date.
+
+  listDrafts:
+    type: list
+    description: "list saved drafts (unsent messages) with each draft's DRAFT id (the r… id), recipient, subject and date. Use that draft id with deleteDraft — a message id from search in:drafts will not work for deletion."
+    resource: users.drafts.list
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        maps_to: q
+      maxResults:
+        type: number
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
+        default: 10
+        max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
+    defaults:
+      userId: me
+
+  deleteDraft:
+    type: action
+    description: "permanently delete a draft (unsent message) by its draft id (the r… id returned by listDrafts). Irreversible — the draft is discarded, not moved to trash."
+    resource: users.drafts.delete
+    params:
+      draftId:
+        type: string
+        description: "Draft id as returned by listDrafts (an r… id, not the message id)"
+        required: true
+        maps_to: id
+    defaults:
+      userId: me
+
+  getAttachment:
+    type: detail
+    description: "download an email attachment to workspace directory (use read first to see attachment list)"
+    resource: users.messages.attachments.get
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+      filename:
+        type: string
+        description: "Attachment filename, exactly as it appears in the `read` response (e.g. 'invoice_template.md')"
+        required: true
+    defaults:
+      userId: me
+
+  viewAttachment:
+    type: detail
+    description: "view an image attachment inline without saving to workspace (png, jpg, gif, webp). Use for quick preview — use getAttachment to save."
+    resource: users.messages.attachments.get
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+      filename:
+        type: string
+        description: "Attachment filename, exactly as it appears in the `read` response (e.g. 'invoice_template.md')"
+        required: true
+    defaults:
+      userId: me
+
+  modify:
+    type: action
+    description: "add or remove labels on a message (e.g. archive, mark read/unread)"
+    resource: users.messages.modify
+    batch:
+      resource: users.messages.batchModify
+      defaults:
+        userId: me
+    params:
+      messageId:
+        type: string
+        description: "Email message ID"
+        required: true
+        maps_to: id
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+    defaults:
+      userId: me
+
+  # --- Label changes over a whole query (ADR-310) ---
+
+  # The server resolves the query at preview and holds the ids, so they never pass through
+  # the conversation; the apply changes exactly that set. Handlers in gmail/modify-matching.ts.
+
+  previewModifyMatching:
+    type: list
+    description: "evaluate a label change over everything a query matches, without making it: the exact count (up to 10,000), a sample, and what the change does to each message. Holds the matched set and returns the previewToken modifyMatching needs. No ids are returned beyond the sample."
+    resource: users.messages.list
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        required: true
+        maps_to: q
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+    defaults:
+      userId: me
+
+  modifyMatching:
+    type: action
+    description: "apply a previewed label change (archive, mark read, label, trash) to exactly the messages previewModifyMatching counted, and report how many changed. Requires its previewToken from an earlier call, within 30 minutes; each preview applies once."
+    resource: users.messages.batchModify
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        required: true
+        maps_to: q
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
+    defaults:
+      userId: me
+
+  # --- Labels ---
+
+  labels:
+    type: list
+    description: "list all labels in the mailbox"
+    resource: users.labels.list
+    defaults:
+      userId: me
+
+  createLabel:
+    type: action
+    description: "create a label. A slash in the name makes it nested (e.g. 'REC/Receipt' under 'REC'). Fails if the name already exists. Use `labels` first to check, then pass the returned label ID to `modify`."
+    resource: users.labels.create
+    params:
+      name:
+        type: string
+        description: "Label name, e.g. 'REC/Receipt'. Nested labels use a slash; create the parent first if Gmail shows nesting."
+        required: true
+      labelListVisibility:
+        type: string
+        description: "Whether the label appears in the label list: labelShow (default), labelShowIfUnread, or labelHide"
+        enum: [labelShow, labelShowIfUnread, labelHide]
+      messageListVisibility:
+        type: string
+        description: "Whether the label appears on messages in the message list: show (default) or hide"
+        enum: [show, hide]
+    defaults:
+      userId: me
+
+  # --- Filters (ADR-309) ---
+
+  # A filter acts on mail that has not arrived yet, so a create or a replace is gated: it
+  # runs only with the token previewFilter mints over that exact change. The handlers are
+  # in gmail/filters.ts. `resource` names the Google method whose scopes the access policy
+  # checks (ADR-202); previewFilter is all reads, and updateFilter's create and delete need
+  # the same scope.
+
+  filters:
+    type: list
+    description: "list the account's filters: id, criteria and what each does. Gmail allows 1,000."
+    resource: users.settings.filters.list
+    defaults:
+      userId: me
+
+  getFilter:
+    type: detail
+    description: "one filter's criteria and actions in words, plus the parameters that recreate or edit it"
+    resource: users.settings.filters.get
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+    defaults:
+      userId: me
+
+  previewFilter:
+    type: list
+    description: "evaluate a filter without creating it: how many messages it matches today and a sample, what each action does, and any duplicate or overlapping filter. Returns the previewToken createFilter needs; with filterId, previews replacing that filter and returns the token updateFilter needs. Criteria are the match* params; actions are addLabelIds, removeLabelIds and forwardTo. A good criterion is the query of a search that already found the mail."
+    resource: users.settings.filters.list
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+    defaults:
+      userId: me
+
+  createFilter:
+    type: action
+    description: "create a filter. Requires the previewToken from previewFilter called with the same parameters, in an earlier call, within 30 minutes. Acts on mail arriving from then on."
+    resource: users.settings.filters.create
+    params:
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
+    defaults:
+      userId: me
+
+  updateFilter:
+    type: action
+    description: "change a filter's criteria or actions. Gmail has no in-place update, so this creates the replacement and then deletes the original; the filter gets a new id. Requires the previewToken from previewFilter called with filterId and the same parameters."
+    resource: users.settings.filters.create
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
+    defaults:
+      userId: me
+
+  deleteFilter:
+    type: action
+    description: "delete a filter. Returns what it was and the parameters to recreate it."
+    resource: users.settings.filters.delete
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+    defaults:
+      userId: me
+
+  # --- Threads ---
+
+  threads:
+    type: list
+    description: "list email threads by query"
+    resource: users.threads.list
+    params:
+      query:
+        type: string
+        description: "Gmail search query (e.g. \"from:alice subject:meeting has:attachment\")"
+        maps_to: q
+      maxResults:
+        type: number
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
+        default: 10
+        max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
+    defaults:
+      userId: me
+
+  getThread:
+    type: detail
+    description: "get all messages in a thread"
+    resource: users.threads.get
+    params:
+      threadId:
+        type: string
+        description: "Thread ID to retrieve"
+        required: true
+        maps_to: id
+    defaults:
+      userId: me
+      format: metadata
+      # format:metadata returns only these headers; formatThreadDetail can show nothing else.
+      metadataHeaders: "From,Subject,Date,To,Cc,Bcc,Reply-To"

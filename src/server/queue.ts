@@ -6,6 +6,8 @@
  * resolution and text for the final response.
  */
 
+import { advanceEpoch } from './handler.js';
+import { MAX_QUEUE_DEPTH } from './tool-names.js';
 import type { HandlerResponse } from './handler.js';
 
 type ToolHandler = (params: Record<string, unknown>) => Promise<HandlerResponse>;
@@ -35,7 +37,16 @@ function stripNextSteps(text: string): string {
 export async function handleQueue(
   params: Record<string, unknown>,
   handlers: Record<string, ToolHandler>,
+  depth = 1,
 ): Promise<HandlerResponse> {
+  if (depth > MAX_QUEUE_DEPTH) {
+    throw new Error(
+      `bulk_operations nested more than ${MAX_QUEUE_DEPTH} deep. Each level multiplies the ` +
+      `work — at 10 operations per queue that ceiling is already 1,000 calls. Flatten the ` +
+      `inner queues into their parent.`,
+    );
+  }
+
   const operations = params.operations as QueueOperation[];
   if (!Array.isArray(operations) || operations.length === 0) {
     throw new Error('operations array is required and must not be empty');
@@ -75,8 +86,20 @@ export async function handleQueue(
     }
 
     try {
+      advanceEpoch(); // Each queued operation is a logical tool call
       const response = await handler(resolvedArgs);
       const text = stripNextSteps(response.text);
+
+      // A safety policy declines by RETURNING, not by throwing, so the catch below never
+      // sees it. Counting that as a success made a queue report "2/2 succeeded" having
+      // written nothing, and left `onError: 'bail'` running the rest of a queue whose
+      // first step was refused.
+      if (response.refs?.blocked) {
+        results.push({ index: i, tool: op.tool, status: 'error', error: text });
+        if (errorStrategy === 'bail') bailedAt = i;
+        continue;
+      }
+
       results.push({ index: i, tool: op.tool, status: 'success', text, refs: response.refs });
       lastSuccessText = response.text; // keep next-steps from last success
     } catch (err) {

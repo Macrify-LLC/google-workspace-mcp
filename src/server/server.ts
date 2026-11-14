@@ -8,14 +8,16 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { toolSchemas } from './tools.js';
 import { handleToolCall } from './handler.js';
-import { GwsError, GwsExitCode } from '../executor/errors.js';
+import { GoogleApiError } from '../google/errors.js';
 import { nextSteps } from './formatting/next-steps.js';
 import { manifest } from '../factory/registry.js';
 import { checkWorkspaceStatus } from '../executor/workspace.js';
+import { VERSION } from '../version.js';
 
 import {
   configurePolicies,
   getActivePolicies,
+  accountAccess,
   draftOnlyEmail,
   noDelete,
   readOnly,
@@ -24,13 +26,25 @@ import {
 } from '../factory/safety.js';
 
 function log(msg: string): void {
-  process.stderr.write(`[gws-mcp] ${msg}\n`);
+  process.stderr.write(`[google-workspace-mcp] ${msg}\n`);
 }
 
-/** Configure safety policies from GWS_SAFETY_POLICY env var. */
+/**
+ * Configure safety policies.
+ *
+ * `account-access` is always active and is not in the map below — it is not a deployment
+ * choice. It enforces the access level the USER chose when they authorized the account
+ * (ADR-202), so gating it behind an operator opt-in would make that choice decorative.
+ * It is a no-op for read/write accounts, which is every account by default.
+ *
+ * Everything else is opt-in through GWS_SAFETY_POLICY.
+ */
 function initSafetyPolicies(): void {
   const policyEnv = process.env.GWS_SAFETY_POLICY || '';
-  if (!policyEnv) return;
+  if (!policyEnv) {
+    configurePolicies([accountAccess]);
+    return;
+  }
 
   const policyMap: Record<string, SafetyPolicy> = {
     'draft-only-email': draftOnlyEmail,
@@ -49,8 +63,7 @@ function initSafetyPolicies(): void {
     );
   }
 
-  const policies = names.map(name => policyMap[name]);
-  configurePolicies(policies);
+  configurePolicies([accountAccess, ...names.map(name => policyMap[name])]);
 }
 
 export function createServer(): Server {
@@ -60,7 +73,7 @@ export function createServer(): Server {
   const server = new Server(
     {
       name: '@aaronsb/google-workspace-mcp',
-      version: '2.0.0-alpha.1',
+      version: VERSION,
     },
     {
       capabilities: {
@@ -87,22 +100,29 @@ export function createServer(): Server {
       log(`call: ${name} ${JSON.stringify(args ?? {}).slice(0, 200)}`);
       const result = await handleToolCall(name, (args ?? {}) as Record<string, unknown>);
       log(`done: ${name}`);
-      return {
-        content: [{ type: 'text', text: result.text }],
-      };
+      const content: Array<Record<string, unknown>> = [{ type: 'text', text: result.text }];
+      if (result.content) {
+        for (const block of result.content) {
+          content.push({ type: block.type, data: block.data, mimeType: block.mimeType });
+        }
+      }
+      return { content };
     } catch (err) {
-      if (err instanceof GwsError) {
-        // Append auth remediation guidance for auth errors
+      if (err instanceof GoogleApiError) {
+        // Read the auth failure from Google, not from an invented status code.
+        // Google states the problem directly: 401 means the token is bad; a 403 whose
+        // reason is a permissions/scope failure means the token is valid but does
+        // not carry the scope this call needs. Both are fixed by re-consenting.
+        // (ADR-103, item 7.)
         const email = (args as Record<string, unknown>)?.email as string | undefined;
-        const guidance = err.exitCode === GwsExitCode.AuthError
+        const guidance = err.isAuthError
           ? nextSteps('accounts', 'auth_error', email ? { email } : undefined)
           : '';
         return {
           content: [{ type: 'text', text: JSON.stringify({
-            error: err.message,
-            exitCode: err.exitCode,
-            reason: err.reason,
-            stderr: err.stderr,
+            error: err.message,          // Google's message, written for an API caller
+            status: err.status,          // the HTTP status, not an invented exit code
+            reason: err.reason,          // e.g. notFound, insufficientPermissions, rateLimitExceeded
           }, null, 2) + guidance }],
           isError: true,
         };
@@ -136,6 +156,12 @@ export function createServer(): Server {
           uri: 'gws://config/workspace',
           name: 'Workspace Directory',
           description: 'File I/O workspace directory status and path',
+          mimeType: 'application/json',
+        },
+        {
+          uri: 'gws://config/version',
+          name: 'Server Version',
+          description: 'Build version of the google-workspace-mcp server',
           mimeType: 'application/json',
         },
       ],
@@ -200,6 +226,16 @@ export function createServer(): Server {
         };
       }
 
+      case 'gws://config/version': {
+        return {
+          contents: [{
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify({ name: '@aaronsb/google-workspace-mcp', version: VERSION }, null, 2),
+          }],
+        };
+      }
+
       default:
         throw new Error(`Unknown resource: ${uri}`);
     }
@@ -237,50 +273,10 @@ async function warmupAccounts(): Promise<void> {
   }
 }
 
-/**
- * Proactively refresh access tokens before they expire. Google OAuth access
- * tokens last ~1 hour; after expiry the first real API call silently fails.
- * Running a refresh every 50 minutes keeps tokens hot for long-running sessions.
- */
-async function scheduleTokenRefresh(): Promise<void> {
-  const REFRESH_INTERVAL_MS = 50 * 60 * 1000; // 50 minutes
-  const refresh = async () => {
-    try {
-      const { listAccounts } = await import('../accounts/registry.js');
-      const { hasCredential } = await import('../accounts/credentials.js');
-      const { warmTokenCache } = await import('../accounts/token-service.js');
-      const accounts = await listAccounts();
-      const { invalidateToken } = await import('../accounts/token-service.js');
-      const withCreds: string[] = [];
-      for (const account of accounts) {
-        if (await hasCredential(account.email)) {
-          withCreds.push(account.email);
-        }
-      }
-      if (withCreds.length > 0) {
-        // Evict cached tokens first so warmTokenCache performs a real network
-        // refresh. Without this, getAccessToken returns the still-valid cached
-        // token and no refresh happens until the cache expires on its own.
-        for (const e of withCreds) invalidateToken(e);
-        await warmTokenCache(withCreds);
-        log(`keepalive: refreshed tokens for ${withCreds.length} account(s)`);
-      }
-    } catch (err) {
-      log(`keepalive: token refresh failed (${(err as Error).message})`);
-    }
-  };
-  // setInterval keeps the event loop alive — unref() so the timer doesn't
-  // prevent the process from exiting if the MCP transport closes cleanly.
-  const timer = setInterval(refresh, REFRESH_INTERVAL_MS);
-  if (timer.unref) timer.unref();
-}
-
 export async function startServer(): Promise<void> {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Non-blocking warmup — don't delay MCP handshake
   warmupAccounts().catch(() => {});
-  // Proactively refresh tokens every 50 min to prevent silent send failures
-  scheduleTokenRefresh().catch(() => {});
 }

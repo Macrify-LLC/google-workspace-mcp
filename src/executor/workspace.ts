@@ -111,7 +111,7 @@ export async function ensureWorkspaceDir(): Promise<WorkspaceStatus> {
 }
 
 /**
- * Sanitize a filename from external sources (email attachments, Drive metadata).
+ * Sanitize a single filename segment (no path separators).
  * Strips null bytes, control characters, path separators, and other dangerous chars.
  */
 export function sanitizeFilename(filename: string): string {
@@ -133,12 +133,34 @@ export function sanitizeFilename(filename: string): string {
 }
 
 /**
+ * Sanitize a path that may contain directory separators.
+ * Each segment is sanitized individually; empty and traversal segments are rejected.
+ */
+export function sanitizePath(inputPath: string): string {
+  // Normalize separators to forward slash, then split
+  const segments = inputPath.replace(/\\/g, '/').split('/').filter(Boolean);
+
+  if (segments.length === 0) return 'unnamed';
+
+  const sanitized = segments.map(segment => {
+    // Reject traversal segments before sanitization
+    if (segment === '..' || segment === '.') {
+      throw new Error(`Path traversal segment rejected: "${segment}"`);
+    }
+    return sanitizeFilename(segment);
+  });
+
+  return sanitized.join(path.sep);
+}
+
+/**
  * Resolve a file path within the workspace directory.
- * Prevents path traversal (e.g. ../../etc/passwd) and sanitizes the filename.
+ * Supports nested paths (e.g. "reports/q1/summary.csv").
+ * Prevents path traversal and sanitizes each path segment.
  */
 export function resolveWorkspacePath(filename: string): string {
   const dir = getWorkspaceDir();
-  const sanitized = sanitizeFilename(filename);
+  const sanitized = sanitizePath(filename);
   const resolved = path.resolve(dir, sanitized);
 
   // Ensure the resolved path is still inside the workspace
@@ -158,16 +180,42 @@ export function resolveWorkspacePath(filename: string): string {
  */
 export async function verifyPathSafety(filePath: string): Promise<void> {
   const dir = path.resolve(getWorkspaceDir());
-  try {
-    const real = await fs.realpath(filePath);
-    if (!real.startsWith(dir + path.sep) && real !== dir) {
+  const assertContained = async (candidate: string): Promise<void> => {
+    const real = await fs.realpath(candidate);
+    const realDir = await fs.realpath(dir);
+    const relative = path.relative(realDir, real);
+    if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) {
       throw new Error(
         `Symlink escape detected: "${filePath}" resolves to "${real}" outside workspace`,
       );
     }
+  };
+
+  try {
+    await assertContained(filePath);
   } catch (err) {
-    // ENOENT is OK — file doesn't exist yet (write case)
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      let ancestor = path.dirname(filePath);
+      while (ancestor !== path.dirname(ancestor)) {
+        try {
+          await fs.realpath(dir);
+          await assertContained(ancestor);
+          return;
+        } catch (ancestorErr) {
+          if ((ancestorErr as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorErr;
+          ancestor = path.dirname(ancestor);
+        }
+      }
+      // A workspace that has not been created yet is allowed; its parent is
+      // necessarily outside the workspace and cannot be used as a containment check.
+      try {
+        await fs.realpath(dir);
+      } catch (dirErr) {
+        if ((dirErr as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw dirErr;
+      }
+      throw err;
+    }
     throw err;
   }
 }

@@ -4,42 +4,49 @@
  * We mock the MCP SDK (ESM-only) and verify that createServer
  * wires handlers correctly and maps responses/errors.
  */
+import { beforeAll, beforeEach, describe, expect, it, vi, type MockedFunction, type Mock } from 'vitest';
 
-// Mock registry before any server imports — avoids import.meta.url in Jest
-jest.mock('../../factory/registry.js', () => {
-  const { loadManifest, generateTools } = jest.requireActual('../../factory/generator.js');
-  const { patches } = jest.requireActual('../../factory/patches.js');
-  const manifest = loadManifest();
-  return { manifest, generatedTools: generateTools(manifest, patches) };
-});
 
-const mockSetRequestHandler = jest.fn();
-const mockServerConnect = jest.fn();
-
-jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
-  Server: jest.fn().mockImplementation(() => ({
-    setRequestHandler: mockSetRequestHandler,
-    connect: mockServerConnect,
-  })),
+// vi.mock is hoisted above module-level consts, so the factory's captures must
+// come from vi.hoisted() to exist by the time the factory runs.
+const { mockSetRequestHandler, mockServerConnect } = vi.hoisted(() => ({
+  mockSetRequestHandler: vi.fn(),
+  mockServerConnect: vi.fn(),
 }));
 
-jest.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
-  StdioServerTransport: jest.fn(),
+vi.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
+  // Must be a function, not an arrow: vitest applies `new` to the implementation.
+  Server: vi.fn(function () {
+    return {
+      setRequestHandler: mockSetRequestHandler,
+      connect: mockServerConnect,
+    };
+  }),
 }));
 
-jest.mock('@modelcontextprotocol/sdk/types.js', () => ({
+vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
+  StdioServerTransport: vi.fn(),
+}));
+
+// Every schema server.ts imports must appear here. Under Jest a missing export
+// silently read as undefined and the handler registered under an undefined key;
+// vitest fails loudly instead.
+vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
   CallToolRequestSchema: 'CallToolRequestSchema',
   ListToolsRequestSchema: 'ListToolsRequestSchema',
+  ListResourcesRequestSchema: 'ListResourcesRequestSchema',
+  ReadResourceRequestSchema: 'ReadResourceRequestSchema',
 }));
 
-jest.mock('../../server/handler.js');
+vi.mock('../../server/handler.js');
 
 import { createServer } from '../../server/server.js';
+import { getActivePolicies } from '../../factory/safety.js';
 import { handleToolCall } from '../../server/handler.js';
-import { GwsError, GwsExitCode } from '../../executor/errors.js';
+import { GoogleApiError } from '../../google/errors.js';
 import type { HandlerResponse } from '../../server/handler.js';
 
-const mockHandleToolCall = handleToolCall as jest.MockedFunction<typeof handleToolCall>;
+const mockHandleToolCall = handleToolCall as MockedFunction<typeof handleToolCall>;
 
 describe('createServer', () => {
   let listToolsHandler: (request: any) => Promise<any>;
@@ -62,6 +69,16 @@ describe('createServer', () => {
   it('registers ListTools and CallTool handlers', () => {
     expect(listToolsHandler).toBeInstanceOf(Function);
     expect(callToolHandler).toBeInstanceOf(Function);
+  });
+
+  // Pins the wiring, not the policy. account-access enforces the access level the USER
+  // chose at consent time (ADR-202), so it is the one policy that must be active with no
+  // GWS_SAFETY_POLICY set — otherwise a read-only account silently keeps full authority
+  // and the consent half becomes decorative. Nothing else fails if this line is deleted:
+  // the policy's own tests configure it directly and stay green.
+  it('activates account-access with no GWS_SAFETY_POLICY set', () => {
+    expect(process.env.GWS_SAFETY_POLICY).toBeFalsy();
+    expect(getActivePolicies().map((p) => p.name)).toContain('account-access');
   });
 
   describe('ListTools handler', () => {
@@ -100,9 +117,19 @@ describe('createServer', () => {
       expect(result.isError).toBeUndefined();
     });
 
-    it('maps GwsError to structured isError response', async () => {
+    // The error surface is Google's now, not a subprocess's. This used to assert on
+    // `exitCode: 2` — a number a CLI made up — and on scraped stderr. It now asserts
+    // on the HTTP status and the reason Google itself states (ADR-103 item 7).
+    const googleError = (status: number, message: string, reason: string) =>
+      new GoogleApiError(
+        status,
+        { error: { code: status, message, errors: [{ reason }] } },
+        { url: 'https://gmail.googleapis.com/…', method: 'GET' },
+      );
+
+    it('maps a 401 to a structured error WITH auth remediation', async () => {
       mockHandleToolCall.mockRejectedValue(
-        new GwsError('Token expired', GwsExitCode.AuthError, 'authError', 'stderr: token invalid'),
+        googleError(401, 'Invalid Credentials', 'authError'),
       );
 
       const result = await callToolHandler({
@@ -111,13 +138,46 @@ describe('createServer', () => {
 
       expect(result.isError).toBe(true);
       const text = result.content[0].text as string;
-      // Error JSON is followed by auth remediation guidance
-      expect(text).toContain('"error": "Token expired"');
-      expect(text).toContain(`"exitCode": ${GwsExitCode.AuthError}`);
+      expect(text).toContain('"error": "Invalid Credentials"');   // Google's own message
+      expect(text).toContain('"status": 401');                    // the real status
       expect(text).toContain('"reason": "authError"');
-      // Auth error should include remediation guidance
       expect(text).toContain('**Next steps:**');
       expect(text).toContain('Re-authenticate');
+    });
+
+    it('maps a 403 SCOPE failure to auth remediation too — it is not a 401, but it is fixed by re-consenting', async () => {
+      // The case the old exit-code check could not distinguish. The token is VALID;
+      // it just does not carry the scope this call needs. Telling the user "error"
+      // and nothing else strands them, because the fix is the same as for a 401.
+      mockHandleToolCall.mockRejectedValue(
+        googleError(403, 'Request had insufficient authentication scopes.', 'insufficientPermissions'),
+      );
+
+      const result = await callToolHandler({
+        params: { name: 'manage_email', arguments: { operation: 'triage', email: 'u@t.com' } },
+      });
+
+      const text = result.content[0].text as string;
+      expect(text).toContain('"status": 403');
+      expect(text).toContain('**Next steps:**');
+      expect(text).toContain('Re-authenticate');
+    });
+
+    it('does NOT offer auth remediation for an error that re-authenticating cannot fix', async () => {
+      // A 404 is not an auth problem. Telling the user to re-authenticate would send
+      // them round a loop that cannot help.
+      mockHandleToolCall.mockRejectedValue(
+        googleError(404, 'File not found: abc123.', 'notFound'),
+      );
+
+      const result = await callToolHandler({
+        params: { name: 'manage_drive', arguments: { operation: 'get', email: 'u@t.com', fileId: 'abc123' } },
+      });
+
+      const text = result.content[0].text as string;
+      expect(text).toContain('"status": 404');
+      expect(text).toContain('"reason": "notFound"');
+      expect(text).not.toContain('Re-authenticate');
     });
 
     it('maps generic Error to plain error message', async () => {

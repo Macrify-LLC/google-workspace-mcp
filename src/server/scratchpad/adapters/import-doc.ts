@@ -1,0 +1,201 @@
+/**
+ * Import adapter: doc — loads a Google Doc into a scratchpad.
+ *
+ * Two modes:
+ * - markdown (default): exports as markdown, strips base64 images to attachments
+ * - json: loads native Docs API JSON, sets live binding for round-trip editing
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { call, download } from '../../../google/client.js';
+import { resolveWorkspacePath } from '../../../executor/workspace.js';
+import { ensureWorkspaceDir } from '../../../executor/workspace.js';
+import type { HandlerResponse } from '../../handler.js';
+import type { ScratchpadManager } from '../manager.js';
+
+interface DocImportParams {
+  email: string;
+  documentId: string;
+  mode?: 'markdown' | 'json';
+}
+
+export async function importDoc(
+  scratchpads: ScratchpadManager,
+  scratchpadId: string,
+  sourceParams: DocImportParams,
+): Promise<HandlerResponse> {
+  const { email, documentId, mode = 'markdown' } = sourceParams;
+  if (!email || !documentId) {
+    return { text: 'email and documentId are required for doc import.', refs: { error: true } };
+  }
+
+  if (mode === 'json') {
+    return importDocJson(scratchpads, scratchpadId, email, documentId);
+  }
+
+  return importDocMarkdown(scratchpads, scratchpadId, email, documentId);
+}
+
+async function importDocMarkdown(
+  scratchpads: ScratchpadManager,
+  scratchpadId: string,
+  email: string,
+  documentId: string,
+): Promise<HandlerResponse> {
+  // Export as markdown. This is DRIVE's files.export — the Docs API has no export
+  // method at all, so anything that reaches for `docs.export` cannot work.
+  // A Doc's fileId IS its documentId.
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `gws-doc-export-${documentId.replace(/[^a-zA-Z0-9_-]/g, '_')}-${Date.now()}.md`,
+  );
+
+  try {
+    await download('drive', 'files.export',
+      { fileId: documentId, mimeType: 'text/markdown' },
+      tmpPath, { account: email });
+
+    const markdown = await fs.readFile(tmpPath, 'utf-8');
+
+    // Strip base64 data URIs, save to workspace, register as attachments
+    const { cleanedLines, attachmentCount } = await stripBase64Images(markdown, scratchpads, scratchpadId);
+
+    scratchpads.appendRawLines(scratchpadId, cleanedLines);
+    scratchpads.setFormat(scratchpadId, 'markdown');
+
+    const attNote = attachmentCount > 0 ? ` (${attachmentCount} embedded image(s) extracted as attachments)` : '';
+    return {
+      text: `Imported doc as markdown (${cleanedLines.length} lines) into scratchpad ${scratchpadId}.${attNote}`,
+      refs: { scratchpadId, documentId, format: 'markdown', linesImported: cleanedLines.length },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      text: `Import failed: ${message}`,
+      refs: { error: true, scratchpadId },
+    };
+  } finally {
+    // The export is a staging file, not a deliverable — it never belonged in the
+    // workspace. Only the extracted images do.
+    await fs.unlink(tmpPath).catch(() => {});
+  }
+}
+
+async function importDocJson(
+  scratchpads: ScratchpadManager,
+  scratchpadId: string,
+  email: string,
+  documentId: string,
+): Promise<HandlerResponse> {
+  try {
+    // includeTabsContent, and it must stay in step with reloadDocsBuffer in
+    // server/scratchpad/handler.ts — the buffer this creates and the buffer that
+    // replaces it after every sync have to describe the document the same way, or a
+    // path that translated before the push stops resolving after it (#155).
+    //
+    // The flag moves content to `tabs[].documentTab.body` and takes `body` away, so
+    // docs-sync addresses `$.tabs[T].documentTab.body.…` and carries each tab's id onto
+    // the requests it emits. Without the flag this imported THE FIRST TAB and called it
+    // the document — #152 on a second surface.
+    const doc = await call('docs', 'documents.get',
+      { documentId, includeTabsContent: true }, { account: email }) as Record<string, unknown>;
+
+    const revisionId = typeof doc.revisionId === 'string' ? doc.revisionId : undefined;
+    const json = JSON.stringify(doc, null, 2);
+    const lines = json.split('\n');
+    const tabCount = countTabs(doc.tabs);
+
+    scratchpads.appendRawLines(scratchpadId, lines);
+    scratchpads.setFormat(scratchpadId, 'json');
+    scratchpads.setBinding(scratchpadId, {
+      service: 'docs',
+      resourceId: documentId,
+      account: email,
+      revisionId,  // optimistic-concurrency seed for batchUpdate (#79)
+    });
+
+    return {
+      text: `Imported doc as JSON (${lines.length} lines, ${tabCount} tab(s)) into scratchpad ${scratchpadId}.\n` +
+        `Live-bound to docs/${documentId} — json_set mutations push back via batchUpdate.\n` +
+        `Content is under \`$.tabs[T].documentTab.body\` — one index space per tab.`,
+      refs: { scratchpadId, documentId, format: 'json', linesImported: lines.length, tabs: tabCount, bound: true, revisionId },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      text: `Import failed: ${message}`,
+      refs: { error: true, scratchpadId },
+    };
+  }
+}
+
+/**
+ * Count tabs including nested ones — `childTabs` hold document content too, and a
+ * count that skips them under-reports the same way the flagless read did.
+ */
+function countTabs(tabs: unknown): number {
+  if (!Array.isArray(tabs)) return 0;
+  return tabs.reduce<number>((total, tab) => {
+    if (!tab || typeof tab !== 'object') return total;
+    return total + 1 + countTabs((tab as Record<string, unknown>).childTabs);
+  }, 0);
+}
+
+/**
+ * Strip base64 data URIs from markdown, save images to workspace,
+ * and register as attachments in the scratchpad side-table.
+ */
+async function stripBase64Images(
+  markdown: string,
+  scratchpads: ScratchpadManager,
+  scratchpadId: string,
+): Promise<{ cleanedLines: string[]; attachmentCount: number }> {
+  // Collect all matches first (can't use async in replace callback)
+  const pattern = /!\[([^\]]*)\]\(data:(image\/[^;]+);base64,([A-Za-z0-9+/=\s]+)\)/g;
+  const matches: Array<{ full: string; alt: string; mimeType: string; data: string }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(markdown)) !== null) {
+    matches.push({ full: match[0], alt: match[1], mimeType: match[2], data: match[3] });
+  }
+
+  if (matches.length === 0) {
+    return { cleanedLines: markdown.split('\n'), attachmentCount: 0 };
+  }
+
+  await ensureWorkspaceDir();
+  let cleaned = markdown;
+
+  for (let i = 0; i < matches.length; i++) {
+    const { full, alt, mimeType, data } = matches[i];
+    const ext = mimeType.split('/')[1] ?? 'png';
+    const shortId = scratchpadId.replace('sp-', '');
+    const filename = `${shortId}-image-${i + 1}.${ext}`;
+
+    // Decode and write to workspace
+    const buffer = Buffer.from(data.replace(/\s/g, ''), 'base64');
+    const filePath = resolveWorkspacePath(filename);
+    await fs.writeFile(filePath, buffer);
+
+    // Register in side-table — use returned refId to avoid mismatch
+    const attachResult = scratchpads.attach(scratchpadId, {
+      source: 'import',
+      filename,
+      mimeType,
+      size: buffer.length,
+      location: filePath,
+    });
+
+    const refId = attachResult?.refId ?? `att-${i + 1}`;
+    cleaned = cleaned.replace(full, `![${alt}](att:${refId} "${filename}, ${formatBytes(buffer.length)}, from import")`);
+  }
+
+  return { cleanedLines: cleaned.split('\n'), attachmentCount: matches.length };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

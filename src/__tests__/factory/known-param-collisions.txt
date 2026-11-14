@@ -1,0 +1,15 @@
+# Frozen param-declaration collisions — DELIBERATELY EMPTY.
+#
+# generateSchema keeps only the FIRST declaration of a param name across a service's
+# operations and drops later ones silently (src/factory/generator.ts). Every param in
+# every manifest now carries one description covering all of its operations, so there is
+# nothing to freeze and the test in generator.test.ts is a hard gate.
+#
+# The 75 entries that used to sit here were resolved in #161. Several were load-bearing:
+# calendar.attendees never told the model that `update` REPLACES the whole attendee list,
+# and calendar.calendarId hid that `freebusy` takes a comma-separated list rather than a
+# single id.
+#
+# If a collision ever appears again, the honest fix is to harmonize the description — one
+# text naming the operations where meaning diverges — not to add a line here. This file
+# exists so that adding one is a visible, deliberate act rather than a silent default.

@@ -33,8 +33,15 @@ Thumbs.db
 logs/
 *.log
 
-# Test coverage
-coverage/
+# Test-coverage output — the vitest/istanbul report directory at the repo ROOT.
+#
+# ANCHORED (leading slash) on purpose. Unanchored, `coverage/` matches a directory
+# named `coverage` at ANY depth, which silently swallowed `src/coverage/` (the coverage
+# MAPPER — source code) and then `src/__tests__/coverage/` (its tests). The mapper only
+# survived because it was already tracked, and someone patched around the symptom with
+# `!src/coverage/` rather than the cause. The tests were not so lucky: they were written,
+# probed, and staged, and git dropped them without a word.
+/coverage/
 commit-message.txt
 discovered-manifest.yaml
 
@@ -42,3 +49,15 @@ discovered-manifest.yaml
 *.mcpb
 mcpb/server/
 mcpb/bin/
+
+# mcp-publisher login state (do not commit credentials)
+.mcpregistry_github_token
+.mcpregistry_registry_token
+
+# Local MCP wiring — contains a real GOOGLE_CLIENT_SECRET
+.mcp.json
+
+# copied into the bundle by `make mcpb`
+mcpb/LICENSE
+mcpb/LICENSE-MIT
+mcpb/NOTICE

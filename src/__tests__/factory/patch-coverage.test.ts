@@ -7,14 +7,12 @@
  * might benefit from a patch. When patches change, it catches regressions
  * where an operation silently loses its custom formatter.
  */
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { loadManifest } from '../../factory/generator.js';
 import { patches } from '../../factory/patches.js';
 import type { ServicePatch, PatchContext } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
-
-// Mock executor — patches that call execute() in custom handlers need this
-jest.mock('../../executor/gws.js');
 
 const manifest = loadManifest();
 
@@ -146,6 +144,28 @@ describe('patch coverage', () => {
     expect(driveCustom).toContain('get');
     expect(driveCustom).toContain('upload');
     expect(driveCustom).toContain('download');
+  });
+
+  it('sheets core operations have custom formatting', () => {
+    const sheetsCustom = coverage
+      .filter(e => e.service === 'sheets' && e.usesCustomFormat)
+      .map(e => e.operation)
+      .sort();
+
+    // Data ops
+    expect(sheetsCustom).toContain('get');
+    expect(sheetsCustom).toContain('read');
+    expect(sheetsCustom).toContain('getValues');
+    expect(sheetsCustom).toContain('create');
+    expect(sheetsCustom).toContain('append');
+    expect(sheetsCustom).toContain('updateValues');
+    // Tab management
+    expect(sheetsCustom).toContain('addSheet');
+    expect(sheetsCustom).toContain('renameSheet');
+    expect(sheetsCustom).toContain('deleteSheet');
+    expect(sheetsCustom).toContain('duplicateSheet');
+    expect(sheetsCustom).toContain('renameSpreadsheet');
+    expect(sheetsCustom).toContain('copySheetTo');
   });
 
   it('meet core operations have custom formatting', () => {

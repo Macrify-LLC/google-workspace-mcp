@@ -1,6 +1,8 @@
-import { validateWorkspaceDir, resolveWorkspacePath, getWorkspaceDir, checkWorkspaceStatus } from '../../executor/workspace.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { validateWorkspaceDir, resolveWorkspacePath, getWorkspaceDir, checkWorkspaceStatus, sanitizePath, verifyPathSafety } from '../../executor/workspace.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 
 const HOME = os.homedir();
 
@@ -44,6 +46,45 @@ describe('validateWorkspaceDir', () => {
   });
 });
 
+describe('sanitizePath', () => {
+  it('preserves directory separators', () => {
+    expect(sanitizePath('reports/q1/summary.csv')).toBe(path.join('reports', 'q1', 'summary.csv'));
+  });
+
+  it('sanitizes each segment individually', () => {
+    expect(sanitizePath('reports/<bad>/file.txt')).toBe(path.join('reports', '_bad_', 'file.txt'));
+  });
+
+  it('rejects .. traversal segments', () => {
+    expect(() => sanitizePath('../etc/passwd')).toThrow(/traversal/);
+    expect(() => sanitizePath('reports/../../etc/passwd')).toThrow(/traversal/);
+  });
+
+  it('rejects . segments', () => {
+    expect(() => sanitizePath('./file.txt')).toThrow(/traversal/);
+  });
+
+  it('handles empty input', () => {
+    expect(sanitizePath('')).toBe('unnamed');
+  });
+
+  it('collapses empty segments from double slashes', () => {
+    expect(sanitizePath('reports//q1///file.txt')).toBe(path.join('reports', 'q1', 'file.txt'));
+  });
+
+  it('normalizes backslashes', () => {
+    expect(sanitizePath('reports\\q1\\file.txt')).toBe(path.join('reports', 'q1', 'file.txt'));
+  });
+
+  it('strips leading dots from segments', () => {
+    expect(sanitizePath('.hidden/file.txt')).toBe(path.join('hidden', 'file.txt'));
+  });
+
+  it('handles single filename (no separators)', () => {
+    expect(sanitizePath('report.csv')).toBe('report.csv');
+  });
+});
+
 describe('resolveWorkspacePath', () => {
   const origEnv = process.env.WORKSPACE_DIR;
 
@@ -64,22 +105,18 @@ describe('resolveWorkspacePath', () => {
     expect(resolved).toBe('/tmp/test-workspace/report.csv');
   });
 
-  it('resolves filename within workspace (sanitized)', () => {
-    // Slashes in filenames get sanitized to underscores
-    const resolved = resolveWorkspacePath('report.csv');
-    expect(resolved).toBe('/tmp/test-workspace/report.csv');
+  it('resolves nested path within workspace', () => {
+    const resolved = resolveWorkspacePath('reports/q1/summary.csv');
+    expect(resolved).toBe('/tmp/test-workspace/reports/q1/summary.csv');
   });
 
-  it('sanitizes path separators in filenames', () => {
-    // Path separators become underscores — no directory traversal
-    const resolved = resolveWorkspacePath('../../etc/passwd');
-    // Leading dots stripped, slashes become underscores
-    expect(resolved).toBe('/tmp/test-workspace/_.._etc_passwd');
+  it('rejects path traversal via ..', () => {
+    expect(() => resolveWorkspacePath('../../etc/passwd')).toThrow(/traversal/);
   });
 
-  it('sanitizes absolute paths', () => {
-    const resolved = resolveWorkspacePath('/etc/passwd');
-    expect(resolved).toBe('/tmp/test-workspace/_etc_passwd');
+  it('sanitizes dangerous characters in path segments', () => {
+    const resolved = resolveWorkspacePath('reports/<bad>/file.txt');
+    expect(resolved).toBe('/tmp/test-workspace/reports/_bad_/file.txt');
   });
 
   it('sanitizes null bytes and control characters', () => {
@@ -135,5 +172,36 @@ describe('checkWorkspaceStatus', () => {
     const status = checkWorkspaceStatus();
     expect(status.valid).toBe(false);
     expect(status.warning).toContain('cannot be');
+  });
+});
+
+describe('verifyPathSafety', () => {
+  it('rejects a new file beneath a directory symlink outside the workspace', async (ctx) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-symlink-'));
+    const workspace = path.join(root, 'workspace');
+    const outside = path.join(root, 'outside');
+    await fs.mkdir(workspace);
+    await fs.mkdir(outside);
+    const link = path.join(workspace, 'linked');
+    try {
+      await fs.symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      await fs.rm(root, { recursive: true, force: true });
+      if ((error as NodeJS.ErrnoException).code === 'EPERM' || (error as NodeJS.ErrnoException).code === 'EACCES' || (error as NodeJS.ErrnoException).code === 'ENOTSUP') {
+        ctx.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const previous = process.env.WORKSPACE_DIR;
+    process.env.WORKSPACE_DIR = workspace;
+    try {
+      await expect(verifyPathSafety(path.join(link, 'new.txt'))).rejects.toThrow(/Symlink escape/);
+    } finally {
+      if (previous === undefined) delete process.env.WORKSPACE_DIR;
+      else process.env.WORKSPACE_DIR = previous;
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
