@@ -180,11 +180,8 @@ export function resolveWorkspacePath(filename: string): string {
  */
 export async function verifyPathSafety(filePath: string): Promise<void> {
   const dir = path.resolve(getWorkspaceDir());
-  try {
-    const real = await fs.realpath(filePath);
-    // Resolve the workspace too: on Windows realpath expands 8.3 aliases (e.g.
-    // JACOBS~1) while path.resolve may preserve them, which otherwise looks like
-    // a false symlink escape for an ordinary file inside the workspace.
+  const assertContained = async (candidate: string): Promise<void> => {
+    const real = await fs.realpath(candidate);
     const realDir = await fs.realpath(dir);
     const relative = path.relative(realDir, real);
     if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) {
@@ -192,9 +189,33 @@ export async function verifyPathSafety(filePath: string): Promise<void> {
         `Symlink escape detected: "${filePath}" resolves to "${real}" outside workspace`,
       );
     }
+  };
+
+  try {
+    await assertContained(filePath);
   } catch (err) {
-    // ENOENT is OK — file doesn't exist yet (write case)
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      let ancestor = path.dirname(filePath);
+      while (ancestor !== path.dirname(ancestor)) {
+        try {
+          await fs.realpath(dir);
+          await assertContained(ancestor);
+          return;
+        } catch (ancestorErr) {
+          if ((ancestorErr as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorErr;
+          ancestor = path.dirname(ancestor);
+        }
+      }
+      // A workspace that has not been created yet is allowed; its parent is
+      // necessarily outside the workspace and cannot be used as a containment check.
+      try {
+        await fs.realpath(dir);
+      } catch (dirErr) {
+        if ((dirErr as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw dirErr;
+      }
+      throw err;
+    }
     throw err;
   }
 }

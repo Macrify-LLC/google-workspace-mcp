@@ -124,6 +124,20 @@ describe('the body Google receives', () => {
     expect(mockCall).toHaveBeenCalledTimes(1);   // the read only; nothing was written
   });
 
+  it('refuses heterogeneous contact update fields before sending a shared mask', async () => {
+    const result = await handleBatch({
+      mode: 'batch', tool: 'manage_contacts', operation: 'update', email: 'u@t.com',
+      items: [
+        { contactId: 'people/c1', name: 'Ada Lovelace' },
+        { contactId: 'people/c2', phone: '555-0100' },
+      ],
+    });
+
+    expect(result.text).toContain('same fields for every item');
+    expect(result.text).toContain("mode:'queue'");
+    expect(mockCall).not.toHaveBeenCalled();
+  });
+
   it('batchCreateContacts takes the same flat fields as single create', async () => {
     // Live, passing flat fields straight through was a 400 from Google: the raw People
     // shape is parallel arrays of objects, which manage_contacts exists to hide.

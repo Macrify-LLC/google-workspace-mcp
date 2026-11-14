@@ -170,6 +170,37 @@ describe('calendarPatch', () => {
       expect(result.text).toContain('Dentist');
     });
 
+    it('follows calendar and event page tokens', async () => {
+      mockCall.mockImplementation(async (_service: string, resource: string, params: Record<string, unknown>) => {
+        if (resource === 'calendarList.list') {
+          return params.pageToken
+            ? { items: [{ id: 'second@test.com', summary: 'Second' }] }
+            : { items: [{ id: 'first@test.com', summary: 'First' }], nextPageToken: 'cal-page-2' };
+        }
+        return params.pageToken
+          ? { items: [{ id: 'evt-2', summary: 'Second page', start: { dateTime: '2026-07-12T10:00:00Z' } }] }
+          : { items: [{ id: 'evt-1', summary: 'First page', start: { dateTime: '2026-07-12T09:00:00Z' } }], nextPageToken: 'event-page-2' };
+      });
+
+      const result = await calendarPatch.customHandlers!.agenda({}, 'user@test.com');
+      expect(result.refs.count).toBe(4);
+      const calls = mockCall.mock.calls;
+      expect(calls.filter((c) => c[1] === 'calendarList.list')).toHaveLength(2);
+      expect(calls.filter((c) => c[1] === 'events.list')).toHaveLength(4);
+    });
+
+    it('reports when event pagination reaches the page limit', async () => {
+      mockCall.mockImplementation(async (_service: string, resource: string) => {
+        if (resource === 'calendarList.list') return { items: [{ id: 'busy@test.com', summary: 'Busy' }] };
+        return { items: [], nextPageToken: 'more' };
+      });
+
+      const result = await calendarPatch.customHandlers!.agenda({}, 'user@test.com');
+      expect(mockCall.mock.calls.filter((c) => c[1] === 'events.list')).toHaveLength(10);
+      expect(result.text).toContain('truncated after 10 pages');
+      expect(result.refs.truncatedPagination).toEqual(['event lists for Busy']);
+    });
+
     it('carries the calendarId of the calendar each event came FROM', async () => {
       mockTwoCalendars();
       const result = await calendarPatch.customHandlers!.agenda({}, 'user@test.com');

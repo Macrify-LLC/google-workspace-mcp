@@ -256,6 +256,16 @@ export async function handleBatch(params: Record<string, unknown>): Promise<Hand
 
   const items = normalizeItems(rawItems, spec.resource);
 
+  if (spec.resource === 'people.batchUpdateContacts') {
+    const fields = items.map((item) => {
+      const person = item.person as Record<string, unknown> | undefined;
+      return [...(person ? Object.keys(person) : buildPerson(item).touched)].sort().join(',');
+    });
+    if (fields.some((field) => field !== fields[0])) {
+      return err("Contact batch updates must use the same fields for every item. Use mode:'queue' for different fields per contact.");
+    }
+  }
+
   const build = BODY_BUILDERS[spec.resource];
   if (!build) {
     // A manifest declared a batch resource this file cannot build a body for. That is a

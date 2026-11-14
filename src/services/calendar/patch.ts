@@ -118,6 +118,27 @@ interface AgendaEvent {
   allDay: boolean;
 }
 
+const AGENDA_PAGE_LIMIT = 10;
+
+async function listAllPages(
+  resource: 'calendarList.list' | 'events.list',
+  params: Record<string, unknown>,
+  account: string,
+): Promise<{ items: Array<Record<string, unknown>>; truncated: boolean }> {
+  const items: Array<Record<string, unknown>> = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < AGENDA_PAGE_LIMIT; page++) {
+    const response = await call('calendar', resource, {
+      ...params,
+      ...(pageToken ? { pageToken } : {}),
+    }, { account }) as Record<string, unknown>;
+    items.push(...((response.items ?? []) as Array<Record<string, unknown>>));
+    pageToken = typeof response.nextPageToken === 'string' ? response.nextPageToken : undefined;
+    if (!pageToken) return { items, truncated: false };
+  }
+  return { items, truncated: Boolean(pageToken) };
+}
+
 /**
  * Compute the agenda window.
  *
@@ -270,8 +291,8 @@ export const calendarPatch: ServicePatch = {
     agenda: async (params, account): Promise<HandlerResponse> => {
       const window = agendaWindow(params);
 
-      const calList = await call('calendar', 'calendarList.list', {}, { account }) as Record<string, unknown>;
-      let calendars = ((calList.items ?? []) as Array<Record<string, unknown>>)
+      const calList = await listAllPages('calendarList.list', {}, account);
+      let calendars = calList.items
         .filter((c) => c.id);
 
       // Optional filter: match an id exactly, or a display name by substring.
@@ -289,19 +310,22 @@ export const calendarPatch: ServicePatch = {
       }
 
       const failures: string[] = [];
+      const truncatedCalendars: string[] = [];
       const perCalendar = await Promise.all(calendars.map(async (cal) => {
         const calendarId = String(cal.id);
         const calendarName = String(cal.summary ?? calendarId);
         try {
-          const res = await call('calendar', 'events.list', {
+          const res = await listAllPages('events.list', {
             calendarId,
             timeMin: window.timeMin,
             timeMax: window.timeMax,
             singleEvents: true,          // expand recurrences into instances
             orderBy: 'startTime',
-          }, { account }) as Record<string, unknown>;
+          }, account);
 
-          return ((res.items ?? []) as Array<Record<string, unknown>>).map((e): AgendaEvent => {
+          if (res.truncated) truncatedCalendars.push(calendarName);
+
+          return res.items.map((e): AgendaEvent => {
             const start = e.start as { dateTime?: string; date?: string } | undefined;
             const end = e.end as { dateTime?: string; date?: string } | undefined;
             const allDay = !start?.dateTime;
@@ -332,6 +356,14 @@ export const calendarPatch: ServicePatch = {
         response.text += `\n\n> ⚠ ${failures.length} calendar(s) could not be read:\n` +
           failures.map((f) => `> - ${f}`).join('\n');
         response.refs = { ...response.refs, unreadableCalendars: failures };
+      }
+      if (calList.truncated || truncatedCalendars.length > 0) {
+        const reasons = [
+          ...(calList.truncated ? ['calendar list'] : []),
+          ...(truncatedCalendars.length ? [`event lists for ${truncatedCalendars.join(', ')}`] : []),
+        ];
+        response.text += `\n\n> ⚠ Agenda results were truncated after ${AGENDA_PAGE_LIMIT} pages for ${reasons.join(' and ')}.`;
+        response.refs.truncatedPagination = reasons;
       }
       return response;
     },
