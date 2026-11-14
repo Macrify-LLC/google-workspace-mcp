@@ -9,7 +9,7 @@
 
 import { call } from '../../google/client.js';
 import { optionalString, requireString } from '../../server/handlers/validate.js';
-import { estimateTokens } from '../../server/formatting/markdown.js';
+import { estimateTokens, wrapExternal } from '../../server/formatting/markdown.js';
 import type { ServicePatch } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -351,7 +351,7 @@ export const docsPatch: ServicePatch = {
 
       return {
         text:
-          `## ${title}\n\n` +
+          `## ${wrapExternal(title, 'Google Docs title')}\n\n` +
           `**Document ID:** ${documentId}\n` +
           `**Revision:** ${String(doc.revisionId ?? '—')}\n` +
           // A scoped read says which tab it read AND how many it did not, so the number
@@ -367,7 +367,7 @@ export const docsPatch: ServicePatch = {
           `**Length:** ${characters} characters, ${lines} line(s)\n` +
           caveats.map((c) => `\n> ${c}\n`).join('') +
           '\n' +
-          (body ? `---\n\n${body}\n` : '_(the document is empty)_\n'),
+          (body ? `---\n\n${wrapExternal(body, 'Google Docs document text')}\n` : '_(the document is empty)_\n'),
         refs: {
           documentId,
           title,

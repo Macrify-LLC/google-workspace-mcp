@@ -71,11 +71,46 @@ describe('formatEmailDetail', () => {
     expect(result.text).toContain('\nTest\n[END EXTERNAL DATA]');
     expect(result.text).toContain('**From:** [EXTERNAL DATA from email sender');
     expect(result.text).toContain('\nalice@test.com\n[END EXTERNAL DATA]');
+    expect(result.text).toContain('**Date:** 2026-03-14');
     expect(result.text).toContain('**Labels:** INBOX');
     expect(result.text).toContain('Preview');
     expect(result.refs.from).toBe('alice@test.com');
     expect(result.refs.subject).toBe('Test');
     expect(result.refs.id).toBe('msg-1');
+  });
+
+  it('shows Cc, Bcc and Reply-To when the message has them', () => {
+    const result = formatEmailDetail({
+      id: 'msg-1',
+      payload: {
+        headers: [
+          { name: 'From', value: 'alice@test.com' },
+          { name: 'To', value: 'bob@test.com' },
+          // Mail in the wild spells these in any case.
+          { name: 'CC', value: 'carol@test.com' },
+          { name: 'bcc', value: 'dave@test.com' },
+          { name: 'Reply-To', value: 'list@test.com' },
+        ],
+      },
+    });
+    expect(result.text).toContain('**Cc:** carol@test.com');
+    expect(result.text).toContain('**Bcc:** dave@test.com');
+    expect(result.text).toContain('**Reply-To:** list@test.com');
+    expect(result.refs.cc).toBe('carol@test.com');
+    expect(result.refs.bcc).toBe('dave@test.com');
+    expect(result.refs.replyTo).toBe('list@test.com');
+  });
+
+  it('omits Cc, Bcc and Reply-To when the message has none', () => {
+    const result = formatEmailDetail({
+      id: 'msg-1',
+      payload: { headers: [{ name: 'To', value: 'bob@test.com' }] },
+    });
+    expect(result.text).not.toMatch(/\*\*(Cc|Bcc|Reply-To):/);
+    // Present but empty, like from and to: a queue's $N.cc throws on a missing field.
+    expect(result.refs.cc).toBe('');
+    expect(result.refs.bcc).toBe('');
+    expect(result.refs.replyTo).toBe('');
   });
 
   it('handles missing payload', () => {
@@ -251,6 +286,26 @@ describe('formatEventDetail', () => {
     expect(result.text).toContain('https://meet.google.com/xxx');
     expect(result.refs.organizer).toBe('org@test.com');
     expect(result.refs.meetLink).toBe('https://meet.google.com/xxx');
+  });
+
+  it('shows the colour and the repeat rule an event carries, so what was set can be read back', () => {
+    const result = formatEventDetail({
+      id: 'evt-1', summary: 'Standup', colorId: '11',
+      start: { dateTime: '2026-03-14T10:00:00+01:00', timeZone: 'Europe/Amsterdam' },
+      end: { dateTime: '2026-03-14T10:15:00+01:00', timeZone: 'Europe/Amsterdam' },
+      recurrence: ['RRULE:FREQ=WEEKLY;COUNT=3', 'EXDATE:20260321T100000Z'],
+    });
+    expect(result.text).toContain('**Colour:** 11');
+    expect(result.text).toContain('**Repeats:** RRULE:FREQ=WEEKLY;COUNT=3; EXDATE:20260321T100000Z');
+    expect(result.refs.colorId).toBe('11');
+    expect(result.refs.recurrence).toEqual(['RRULE:FREQ=WEEKLY;COUNT=3', 'EXDATE:20260321T100000Z']);
+  });
+
+  it('prints neither line for an event with no colour and no rule', () => {
+    const result = formatEventDetail({ id: 'x', summary: 'Once', start: {}, end: {} });
+    expect(result.text).not.toContain('Colour');
+    expect(result.text).not.toContain('Repeats');
+    expect(result.refs.colorId).toBeUndefined();
   });
 
   it('handles missing conference data', () => {

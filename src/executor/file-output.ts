@@ -10,7 +10,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ensureWorkspaceDir, resolveWorkspacePath, verifyPathSafety } from './workspace.js';
-import type { ContentBlock } from '../server/formatting/markdown.js';
+import { wrapExternal, type ContentBlock } from '../server/formatting/markdown.js';
 
 /** MIME types and extensions considered text-safe for inline return. */
 const TEXT_MIME_PREFIXES = [
@@ -132,7 +132,7 @@ export function formatFileOutput(result: FileOutputResult): string {
 
   if (result.content) {
     // Escape any triple backticks in the content to prevent markdown fence injection
-    const safeContent = result.content.replace(/```/g, '` ` `');
+    const safeContent = wrapExternal(result.content, 'downloaded file content').replace(/```/g, '` ` `');
     parts.push('', '---', '', '```', safeContent, '```');
   } else if (result.imageBlock) {
     parts.push('', '_Image included inline below._');

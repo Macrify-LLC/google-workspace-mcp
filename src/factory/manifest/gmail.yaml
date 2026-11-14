@@ -8,7 +8,7 @@ operations:
 
   search:
     type: list
-    description: "find emails by query"
+    description: "find emails by query. Says when more results exist than the page shows; continue with pageToken, or pass idsOnly to collect up to 500 ids per page for bulk_operations."
     resource: users.messages.list
     params:
       query:
@@ -17,9 +17,16 @@ operations:
         maps_to: q
       maxResults:
         type: number
-        description: "Max results (default: 10, max: 50)"
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
         default: 10
         max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
+      idsOnly:
+        type: boolean
+        description: "On `search`: return only message ids, up to 500 per page, without fetching each message's headers. For counting a large result or collecting ids to pass to bulk_operations batch mode (e.g. modify)."
+        client_only: true
     defaults:
       userId: me
     hydration:
@@ -95,7 +102,7 @@ operations:
         description: "Treat body as HTML content (default: plain text)"
       draft:
         type: boolean
-        description: "Save as draft instead of sending (default: false, forced true when attachments present)"
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
 
   reply:
     type: action
@@ -117,7 +124,7 @@ operations:
         description: "Treat body as HTML content (default: plain text)"
       draft:
         type: boolean
-        description: "Save as draft instead of sending (default: false, forced true when attachments present)"
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
 
   replyAll:
     type: action
@@ -142,7 +149,7 @@ operations:
         description: "Treat body as HTML content (default: plain text)"
       draft:
         type: boolean
-        description: "Save as draft instead of sending (default: false, forced true when attachments present)"
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
 
   forward:
     type: action
@@ -159,6 +166,9 @@ operations:
       body:
         type: string
         description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+      draft:
+        type: boolean
+        description: "Save as a draft instead of sending (default: false). On `send`, `reply` and `replyAll`, attachments force a draft. Under the draft-only-email safety policy, these operations need `draft: true`."
 
   # --- Inbox management ---
 
@@ -169,6 +179,10 @@ operations:
     type: list
     description: "unread inbox summary (sender, subject, date)"
     resource: users.messages.list
+    params:
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
     defaults:
       userId: me
       q: "is:unread in:inbox"
@@ -230,9 +244,12 @@ operations:
         maps_to: q
       maxResults:
         type: number
-        description: "Max results (default: 10, max: 50)"
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
         default: 10
         max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
     defaults:
       userId: me
 
@@ -297,10 +314,56 @@ operations:
         maps_to: id
       addLabelIds:
         type: string
-        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123)"
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
       removeLabelIds:
         type: string
-        description: "Comma-separated label IDs to remove (e.g. UNREAD, INBOX to archive)"
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+    defaults:
+      userId: me
+
+  # --- Label changes over a whole query (ADR-310) ---
+
+  # The server resolves the query at preview and holds the ids, so they never pass through
+  # the conversation; the apply changes exactly that set. Handlers in gmail/modify-matching.ts.
+
+  previewModifyMatching:
+    type: list
+    description: "evaluate a label change over everything a query matches, without making it: the exact count (up to 10,000), a sample, and what the change does to each message. Holds the matched set and returns the previewToken modifyMatching needs. No ids are returned beyond the sample."
+    resource: users.messages.list
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        required: true
+        maps_to: q
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+    defaults:
+      userId: me
+
+  modifyMatching:
+    type: action
+    description: "apply a previewed label change (archive, mark read, label, trash) to exactly the messages previewModifyMatching counted, and report how many changed. Requires its previewToken from an earlier call, within 30 minutes; each preview applies once."
+    resource: users.messages.batchModify
+    params:
+      query:
+        type: string
+        description: 'Gmail search query (e.g. "from:alice subject:meeting has:attachment")'
+        required: true
+        maps_to: q
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
     defaults:
       userId: me
 
@@ -333,6 +396,194 @@ operations:
     defaults:
       userId: me
 
+  # --- Filters (ADR-309) ---
+
+  # A filter acts on mail that has not arrived yet, so a create or a replace is gated: it
+  # runs only with the token previewFilter mints over that exact change. The handlers are
+  # in gmail/filters.ts. `resource` names the Google method whose scopes the access policy
+  # checks (ADR-202); previewFilter is all reads, and updateFilter's create and delete need
+  # the same scope.
+
+  filters:
+    type: list
+    description: "list the account's filters: id, criteria and what each does. Gmail allows 1,000."
+    resource: users.settings.filters.list
+    defaults:
+      userId: me
+
+  getFilter:
+    type: detail
+    description: "one filter's criteria and actions in words, plus the parameters that recreate or edit it"
+    resource: users.settings.filters.get
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+    defaults:
+      userId: me
+
+  previewFilter:
+    type: list
+    description: "evaluate a filter without creating it: how many messages it matches today and a sample, what each action does, and any duplicate or overlapping filter. Returns the previewToken createFilter needs; with filterId, previews replacing that filter and returns the token updateFilter needs. Criteria are the match* params; actions are addLabelIds, removeLabelIds and forwardTo. A good criterion is the query of a search that already found the mail."
+    resource: users.settings.filters.list
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+    defaults:
+      userId: me
+
+  createFilter:
+    type: action
+    description: "create a filter. Requires the previewToken from previewFilter called with the same parameters, in an earlier call, within 30 minutes. Acts on mail arriving from then on."
+    resource: users.settings.filters.create
+    params:
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
+    defaults:
+      userId: me
+
+  updateFilter:
+    type: action
+    description: "change a filter's criteria or actions. Gmail has no in-place update, so this creates the replacement and then deletes the original; the filter gets a new id. Requires the previewToken from previewFilter called with filterId and the same parameters."
+    resource: users.settings.filters.create
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+      matchFrom:
+        type: string
+        description: "Filter criterion: sender, e.g. billing@vendor.com or @vendor.com"
+      matchTo:
+        type: string
+        description: "Filter criterion: recipient, e.g. a list or alias address"
+      matchSubject:
+        type: string
+        description: "Filter criterion: words in the subject"
+      matchQuery:
+        type: string
+        description: "Filter criterion: any Gmail search query the message must match, same syntax as search"
+      matchNegatedQuery:
+        type: string
+        description: "Filter criterion: a Gmail search query the message must NOT match"
+      matchHasAttachment:
+        type: boolean
+        description: "Filter criterion: only messages with an attachment"
+      matchExcludeChats:
+        type: boolean
+        description: "Filter criterion: leave chat messages out"
+      matchSize:
+        type: number
+        description: "Filter criterion: size in bytes; requires matchSizeComparison"
+      matchSizeComparison:
+        type: string
+        description: "Filter criterion: whether matches are larger or smaller than matchSize"
+        enum: [larger, smaller]
+      addLabelIds:
+        type: string
+        description: "Comma-separated label IDs to add (e.g. STARRED, IMPORTANT, Label_123). On modify, to this message; on the filter operations, to each matching message as it arrives; on the *ModifyMatching operations, to every message the preview counted."
+      removeLabelIds:
+        type: string
+        description: "Comma-separated label IDs to remove (e.g. UNREAD to mark read, INBOX to archive). On modify, from this message; on the filter operations, from each matching message as it arrives; on the *ModifyMatching operations, from every message the preview counted."
+      forwardTo:
+        type: string
+        description: "Filter action: forward each match to this address. It must already be a verified forwarding address in Gmail settings."
+      previewToken:
+        type: string
+        description: "The token the preview returned for this exact change: previewFilter for createFilter and updateFilter, previewModifyMatching for modifyMatching. Required: the write runs only after its preview has been seen."
+    defaults:
+      userId: me
+
+  deleteFilter:
+    type: action
+    description: "delete a filter. Returns what it was and the parameters to recreate it."
+    resource: users.settings.filters.delete
+    params:
+      filterId:
+        type: string
+        description: "Filter id, as listed by `filters`. On previewFilter, the filter a change would replace; leave it out to preview a new filter."
+        maps_to: id
+    defaults:
+      userId: me
+
   # --- Threads ---
 
   threads:
@@ -346,9 +597,12 @@ operations:
         maps_to: q
       maxResults:
         type: number
-        description: "Max results (default: 10, max: 50)"
+        description: "Max results per page (default 10, max 50). On `search` with idsOnly, default and max 500."
         default: 10
         max: 50
+      pageToken:
+        type: string
+        description: "Continue a list from where the previous page stopped: pass the pageToken its response gave. Absent from a response means that response was the last page."
     defaults:
       userId: me
 
@@ -365,4 +619,5 @@ operations:
     defaults:
       userId: me
       format: metadata
-      metadataHeaders: "From,Subject,Date,To"
+      # format:metadata returns only these headers; formatThreadDetail can show nothing else.
+      metadataHeaders: "From,Subject,Date,To,Cc,Bcc,Reply-To"

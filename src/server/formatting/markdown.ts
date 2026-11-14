@@ -258,6 +258,9 @@ export function formatEmailDetail(
   const id = String(msg.id ?? '');
   const from = getHeader('from');
   const to = getHeader('to');
+  const cc = getHeader('cc');
+  const bcc = getHeader('bcc');
+  const replyTo = getHeader('reply-to');
   const subject = getHeader('subject');
   const date = getHeader('date');
   const labels = (msg.labelIds ?? []) as string[];
@@ -270,8 +273,11 @@ export function formatEmailDetail(
     '',
     `**From:** ${wrapExternal(from, 'email sender')}`,
     `**To:** ${to}`,
-    `**Date:** ${date}`,
   ];
+  if (cc) parts.push(`**Cc:** ${cc}`);
+  if (bcc) parts.push(`**Bcc:** ${bcc}`);
+  if (replyTo) parts.push(`**Reply-To:** ${replyTo}`);
+  parts.push(`**Date:** ${date}`);
 
   if (labels.length > 0) {
     parts.push(`**Labels:** ${labels.join(', ')}`);
@@ -299,6 +305,9 @@ export function formatEmailDetail(
       messageId: id,
       from,
       to,
+      cc,
+      bcc,
+      replyTo,
       subject,
       bodyTruncated: bodyContent.truncated,
       fullBodyTokens: bodyContent.fullBodyTokens,
@@ -374,6 +383,11 @@ export function formatEventDetail(data: unknown): HandlerResponse {
   if (location) parts.push(`**Where:** ${location}`);
   if (organizer) parts.push(`**Organizer:** ${organizer}`);
   if (meetLink) parts.push(`**Meet:** ${meetLink}`);
+  // Colour and repeat rule are written by `create` / `update`; showing them is how the caller reads back what it set.
+  const recurrence = Array.isArray(event.recurrence) ? (event.recurrence as unknown[]).map(String) : [];
+  if (recurrence.length > 0) parts.push(`**Repeats:** ${recurrence.join('; ')}`);
+  const colorId = event.colorId ? String(event.colorId) : undefined;
+  if (colorId) parts.push(`**Colour:** ${colorId}`);
 
   if (attendees.length > 0) {
     parts.push('', '**Attendees:**');
@@ -399,6 +413,8 @@ export function formatEventDetail(data: unknown): HandlerResponse {
       end,
       organizer,
       meetLink,
+      ...(recurrence.length > 0 ? { recurrence } : {}),
+      ...(colorId ? { colorId } : {}),
     },
   };
 }

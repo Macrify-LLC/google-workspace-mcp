@@ -381,7 +381,6 @@
           "status": "covered",
           "params": {
             "includeSpamTrash": "gap",
-            "pageToken": "gap",
             "labelIds": "gap"
           }
         },
@@ -455,16 +454,16 @@
           "status": "gap"
         },
         "users.settings.filters.get": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.settings.filters.create": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.settings.filters.list": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.settings.filters.delete": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.settings.delegates.create": {
           "status": "gap"
@@ -562,7 +561,6 @@
         "users.drafts.list": {
           "status": "covered",
           "params": {
-            "pageToken": "gap",
             "includeSpamTrash": "gap"
           }
         },
@@ -584,11 +582,8 @@
         "users.messages.list": {
           "status": "covered",
           "params": {
-            "pageToken": "gap",
             "includeSpamTrash": "gap",
-            "maxResults": "gap",
-            "labelIds": "gap",
-            "q": "gap"
+            "labelIds": "gap"
           }
         },
         "users.messages.batchDelete": {
@@ -1020,9 +1015,7 @@
         "conferenceRecords.list": {
           "status": "covered",
           "params": {
-            "pageSize": "gap",
-            "pageToken": "gap",
-            "filter": "gap"
+            "pageToken": "gap"
           }
         },
         "conferenceRecords.recordings.get": {
@@ -1066,8 +1059,7 @@
         "conferenceRecords.transcripts.list": {
           "status": "covered",
           "params": {
-            "pageSize": "gap",
-            "parent": "gap"
+            "pageSize": "gap"
           }
         },
         "conferenceRecords.transcripts.entries.get": {

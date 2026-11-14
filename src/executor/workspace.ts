@@ -182,7 +182,12 @@ export async function verifyPathSafety(filePath: string): Promise<void> {
   const dir = path.resolve(getWorkspaceDir());
   try {
     const real = await fs.realpath(filePath);
-    if (!real.startsWith(dir + path.sep) && real !== dir) {
+    // Resolve the workspace too: on Windows realpath expands 8.3 aliases (e.g.
+    // JACOBS~1) while path.resolve may preserve them, which otherwise looks like
+    // a false symlink escape for an ordinary file inside the workspace.
+    const realDir = await fs.realpath(dir);
+    const relative = path.relative(realDir, real);
+    if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) {
       throw new Error(
         `Symlink escape detected: "${filePath}" resolves to "${real}" outside workspace`,
       );

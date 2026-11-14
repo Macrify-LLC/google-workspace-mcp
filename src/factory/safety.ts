@@ -90,20 +90,36 @@ export interface SafetyPolicy {
 // ── Built-in policies ────────────────────────────────────────────────
 
 /**
- * Draft-only email policy — blocks send/reply/forward, allows everything else.
- * Agents can read, search, triage, and label emails but cannot send on behalf of the user.
+ * Draft-only email policy — blocks send/reply/forward unless the call only saves a draft,
+ * allows everything else. Agents can read, search, triage, label and draft emails (in the
+ * original thread, for replies and forwards) but cannot send on behalf of the user.
  */
 export const draftOnlyEmail: SafetyPolicy = {
   name: 'draft-only-email',
-  description: 'Block outbound email — agents can read but not send',
+  description: 'Block outbound email — agents can read and save drafts but not send',
   applies: (service) => service === 'gmail',
   evaluate: (_args, ctx) => {
     const blocked = ['send', 'reply', 'replyAll', 'forward'];
-    if (blocked.includes(ctx.operation)) {
+    // The exact test the Gmail handlers use to choose users.drafts.create over
+    // users.messages.send. A queue `$N` reference arrives as the string 'true'. Anything
+    // looser would allow a call the handler then sends.
+    const savesDraft = ctx.params.draft === true || ctx.params.draft === 'true';
+    if (blocked.includes(ctx.operation) && !savesDraft) {
       return {
         action: 'block',
         reason: `Operation '${ctx.operation}' is blocked by draft-only email policy. ` +
-          `The agent can read, search, and triage emails but cannot send on behalf of the user.`,
+          `The agent can read, search, triage and draft emails but cannot send on behalf of the user. ` +
+          `Pass draft: true to save it as a draft instead.`,
+      };
+    }
+    // A filter that forwards sends every future match, with nobody in the loop for any of
+    // them. That is outbound mail, however it is set up.
+    const filterWrites = ['createFilter', 'updateFilter'];
+    if (filterWrites.includes(ctx.operation) && String(ctx.params.forwardTo ?? '').trim()) {
+      return {
+        action: 'block',
+        reason: `A filter that forwards mail is blocked by draft-only email policy: it would send every ` +
+          `future match to ${String(ctx.params.forwardTo)}. Filters that label, archive or mark mail are allowed.`,
       };
     }
     return { action: 'allow' };
@@ -158,7 +174,7 @@ function isReadOperation(operation: string): boolean {
   // Prefix patterns: get*, list*, search*
   if (op.startsWith('get') || op.startsWith('list') || op.startsWith('search')) return true;
   // Exact read-only names
-  const readOps = ['read', 'triage', 'labels', 'threads', 'agenda', 'calendars', 'freebusy', 'tree'];
+  const readOps = ['read', 'triage', 'labels', 'threads', 'agenda', 'calendars', 'freebusy', 'tree', 'filters', 'previewfilter', 'previewmodifymatching'];
   return readOps.includes(op);
 }
 
@@ -232,23 +248,36 @@ export const accountAccess: SafetyPolicy = {
     if (required.length === 0) return { action: 'allow' };
     if (required.some((scope) => granted.has(scope))) return { action: 'allow' };
 
-    // Nothing the operation accepts was granted. Two different causes, two different fixes.
+    // Nothing the operation accepts was granted. Three different causes: the account
+    // never authorized the service, authorized it read-only, or authorized it read/write
+    // before the service's scope set grew to include what this operation needs.
     const holdsSomething = anyScopesFor(op.service).some((scope) => granted.has(scope));
+    const holdsWrite = writeScopesFor(op.service).some((scope) => granted.has(scope));
     const reconsent =
       `manage_accounts {operation:'scopes', email:'${ctx.account}', ` +
       `services:'${op.service}', access:'readwrite'}`;
 
-    return {
-      action: 'block',
-      reason: holdsSomething
-        ? `'${ctx.operation}' needs write access to ${op.service}. ` +
-          `Account ${ctx.account} was authorized read-only for ${op.service}. ` +
-          `Re-authorize with ${reconsent}, or use an account that already has it.`
-        : `'${ctx.operation}' needs access to ${op.service}, which account ${ctx.account} ` +
-          `has never authorized. Grant it with ${reconsent}, or use an account that already has it.`,
-    };
+    let reason: string;
+    if (holdsWrite) {
+      reason = `'${ctx.operation}' needs ${required.map(scopeName).join(' or ')}, which account ${ctx.account} ` +
+        `has not granted: either the account authorized ${op.service} before this server asked for it, or it was ` +
+        `declined on the consent screen. Re-authorize with ${reconsent} and allow it.`;
+    } else if (holdsSomething) {
+      reason = `'${ctx.operation}' needs write access to ${op.service}. ` +
+        `Account ${ctx.account} was authorized read-only for ${op.service}. ` +
+        `Re-authorize with ${reconsent}, or use an account that already has it.`;
+    } else {
+      reason = `'${ctx.operation}' needs access to ${op.service}, which account ${ctx.account} ` +
+        `has never authorized. Grant it with ${reconsent}, or use an account that already has it.`;
+    }
+    return { action: 'block', reason };
   },
 };
+
+/** `https://www.googleapis.com/auth/gmail.settings.basic` -> `gmail.settings.basic`. */
+function scopeName(scope: string): string {
+  return scope.replace('https://www.googleapis.com/auth/', '');
+}
 
 /**
  * The scopes Google will accept for this operation.
